@@ -2,7 +2,6 @@
 ccxt==4.3.95
 # ccxt.pro==4.3.95      # requires private license - comment out if not using
 pandas==2.2.2
-pandas_ta==0.3.14b0
 numpy==1.26.4
 pyarrow==16.0.0       # fast parquet caching
 
@@ -25,7 +24,6 @@ websockets==12.0
 requests==2.32.3
 
 # ─── Backtesting ─────────────────────────────────────────────────────────────
-vectorbt==0.26.2
 
 # ─── Plotting / Reports ──────────────────────────────────────────────────────
 plotly==5.22.0
@@ -41,3 +39,13 @@ python-telegram-bot==21.3
 pytz==2024.1
 python-dateutil==2.9.0
 schedule==1.2.1
+
+# ─── vectorbt dependencies (vectorbt is installed via build.sh --no-deps) ─────
+scipy
+scikit-learn
+matplotlib
+dateparser
+dill
+imageio
+ipywidgets>=7.0.0
+mypy_extensions
