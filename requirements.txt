@@ -1,9 +1,9 @@
 # ─── Core Exchange & Data ────────────────────────────────────────────────────
 ccxt==4.3.95
 # ccxt.pro==4.3.95      # requires private license - comment out if not using
-pandas==2.2.2
-numpy==1.26.4
-pyarrow==16.0.0       # fast parquet caching
+pandas==2.3.2
+numpy==2.2.6
+pyarrow==20.0.0       # fast parquet caching
 
 # ─── AI Providers ─────────────────────────────────────────────────────────────
 anthropic==0.29.0
