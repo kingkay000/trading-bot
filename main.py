@@ -23,7 +23,9 @@ import signal
 import os
 import sys
 import time
+import threading
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -47,6 +49,28 @@ load_dotenv()
 log = get_logger("trading_bot")
 
 
+def start_health_server(port: int) -> None:
+    """
+    Start a lightweight HTTP health server for PaaS platforms (e.g. Render web services)
+    that require an open port.
+    """
+
+    class _HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - standard library handler name
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format: str, *args: Any) -> None:  # silence stdlib noise
+            return
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log.info(f"Health server started on 0.0.0.0:{port}")
+
+
 class TradingBot:
     """
     The orchestrator that runs the main trading logic loop.
@@ -61,11 +85,24 @@ class TradingBot:
             self.config["trading"]["mode"] = args.mode
 
         # Initialize Modules
-        if self.config["trading"]["exchange"] == "mt5":
-            from modules.mt5_connector import MT5Connector
+        exchange_name = self.config["trading"].get("exchange", "binance")
+        if exchange_name == "mt5":
+            try:
+                from modules.mt5_connector import MT5Connector
 
-            self.data_engine = MT5Connector(self.config)
-            self.execution_engine = self.data_engine
+                self.data_engine = MT5Connector(self.config)
+                self.execution_engine = self.data_engine
+            except ModuleNotFoundError as exc:
+                fallback_exchange = self.config["trading"].get("fallback_exchange", "bybit")
+                log.warning(
+                    "MetaTrader5 is not available in this environment. "
+                    f"Falling back to '{fallback_exchange}'. Original error: {exc}"
+                )
+                self.config["trading"]["exchange"] = fallback_exchange
+                self.data_engine = DataEngine(self.config)
+                self.execution_engine = ExecutionEngine(
+                    self.config, exchange=self.data_engine.exchange
+                )
         else:
             self.data_engine = DataEngine(self.config)
             self.execution_engine = ExecutionEngine(
@@ -361,6 +398,14 @@ def main():
     parser.add_argument("--backtest", action="store_true", help="Run backtest mode")
     parser.add_argument("--timeframe", help="Override timeframe")
     args = parser.parse_args()
+
+    # Render web services expect a bound port; keep a tiny health endpoint open.
+    port = os.getenv("PORT")
+    if port and not args.backtest:
+        try:
+            start_health_server(int(port))
+        except Exception as exc:
+            log.warning(f"Failed to start health server on PORT={port}: {exc}")
 
     # Load Config
     config = load_config("config.yaml")
