@@ -7,6 +7,7 @@ trading:
   higher_timeframe: "4h"
   mode: "paper"
   exchange: "mt5"
+  fallback_exchange: "bybit"  # used automatically if MetaTrader5 is unavailable
   scan_interval: 60
   session_filter: true    # NEW: only trade during London/NY volatility
   wait_for_bar_close: true # Prevent scalping by waiting for candle to finish
