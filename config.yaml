@@ -95,3 +95,8 @@ news:
   skip_high_impact: true
   news_buffer_minutes: 30      # pause trading N minutes before/after
   finnhub_enabled: false       # set true and add FINNHUB_API_KEY to .env
+
+# ─── Optional Execution Bridge (FastAPI) ───────────────────────────────────
+execution_bridge:
+  enabled: true
+  url: "http://0.0.0.0:10000"

@@ -62,6 +62,18 @@ def start_health_server(port: int) -> None:
             self.end_headers()
             self.wfile.write(b"ok")
 
+        def do_POST(self) -> None:  # noqa: N802 - standard library handler name
+            # Lightweight local bridge endpoints so this same process can accept
+            # internal sync/heartbeat posts when configured.
+            if self.path in ("/signals", "/bot/heartbeat"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+                return
+            self.send_response(404)
+            self.end_headers()
+
         def log_message(self, format: str, *args: Any) -> None:  # silence stdlib noise
             return
 
@@ -119,6 +131,9 @@ class TradingBot:
         self.trade_monitor = TradeMonitor(config)
         self.alerting_engine = AlertingEngine(config)
         self.dashboard = Dashboard()
+        self.bridge_cfg = self.config.get("execution_bridge", {})
+        self.bridge_enabled = self.bridge_cfg.get("enabled", False)
+        self.bridge_url = self.bridge_cfg.get("url", "http://localhost:8000")
 
         # Historical tracking for dashboard
         self.signal_history: List[Dict[str, Any]] = []
@@ -174,10 +189,11 @@ class TradingBot:
                         log.error(f"Error processing {symbol}: {exc}", exc_info=True)
 
                 # Send heartbeat to execution server after each scan cycle
-                try:
-                    self._send_heartbeat()
-                except Exception as e:
-                    log.debug(f"Heartbeat send failed (server may not be running): {e}")
+                if self.bridge_enabled:
+                    try:
+                        self._send_heartbeat()
+                    except Exception as e:
+                        log.debug(f"Heartbeat send failed (server may not be running): {e}")
 
                 # Wait for next scan interval
                 interval = self.config["trading"].get("scan_interval", 60)
@@ -329,9 +345,11 @@ class TradingBot:
 
     def _sync_signal_to_server(self, signal: Any) -> None:
         """Helper to push the latest AI analysis to the execution server."""
+        if not self.bridge_enabled:
+            return
         import requests
         
-        url = "http://localhost:8000/signals"
+        url = f"{self._bridge_base_url()}/signals"
         api_key = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
         
         payload = {
@@ -350,9 +368,11 @@ class TradingBot:
 
     def _send_heartbeat(self) -> None:
         """Send a status heartbeat to the execution server after each scan cycle."""
+        if not self.bridge_enabled:
+            return
         import requests
 
-        url = "http://localhost:8000/bot/heartbeat"
+        url = f"{self._bridge_base_url()}/bot/heartbeat"
         api_key = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
 
         timeframes = [
@@ -376,6 +396,11 @@ class TradingBot:
 
         headers = {"X-API-KEY": api_key}
         requests.post(url, json=payload, headers=headers, timeout=5)
+
+    def _bridge_base_url(self) -> str:
+        """Normalize bridge URL for loopback calls inside the same process."""
+        base = self.bridge_url.rstrip("/")
+        return base.replace("://0.0.0.0", "://127.0.0.1")
 
     async def run_backtest(self) -> None:
         """Run backtesting mode for multiple timeframes and exit."""
