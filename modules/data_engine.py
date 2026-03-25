@@ -38,6 +38,14 @@ EXCHANGE_MAP: Dict[str, Any] = {
     "bybit": ccxt.bybit,
 }
 
+# MT5-like symbol to Bybit symbol aliases (expand as needed)
+MT5_TO_BYBIT: Dict[str, str] = {
+    "EURUSD": "EURUSDT",
+    "XAUUSD": "XAUUSDT",  # Gold
+    "BTCUSD": "BTCUSDT",
+    "US500": "SPX500USDT",  # S&P 500
+}
+
 # Supported timeframes and their millisecond equivalents
 TF_MS: Dict[str, int] = {
     "1m": 60_000,
@@ -92,11 +100,12 @@ class DataEngine:
                 f"Supported: {list(EXCHANGE_MAP.keys())}"
             )
 
+        default_type = "linear" if self.exchange_id == "bybit" else "spot"
         exchange_opts: Dict[str, Any] = {
             "apiKey": resolved_key,
             "secret": resolved_secret,
             "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
+            "options": {"defaultType": default_type},
         }
         if testnet:
             exchange_opts["options"]["testnet"] = True
@@ -106,6 +115,19 @@ class DataEngine:
             f"DataEngine initialised — exchange={self.exchange_id} "
             f"symbols={self.symbols} timeframe={self.timeframe}"
         )
+
+    def _normalize_symbol(self, symbol: str) -> str:
+        """
+        Normalize incoming symbol to exchange-specific format.
+
+        For Bybit fallback, this maps MT5-style symbols (e.g. EURUSD) to
+        Bybit-style symbols expected by ccxt (e.g. EURUSDT).
+        """
+        if self.exchange_id != "bybit":
+            return symbol
+
+        raw = symbol.replace("/", "").upper()
+        return MT5_TO_BYBIT.get(raw, symbol)
 
     # ─── Cache Helpers ────────────────────────────────────────────────────────
 
@@ -189,6 +211,7 @@ class DataEngine:
             pandas DataFrame with DatetimeIndex and columns:
             [open, high, low, close, volume]
         """
+        resolved_symbol = self._normalize_symbol(symbol)
         tf = timeframe or self.timeframe
         cache_path = self._cache_path(symbol, tf)
 
@@ -199,7 +222,7 @@ class DataEngine:
                 return cached
 
         # Fetch paginated data to build full history
-        log.info(f"Fetching OHLCV: {symbol} / {tf} (limit={limit})")
+        log.info(f"Fetching OHLCV: {symbol} -> {resolved_symbol} / {tf} (limit={limit})")
         since_ms: Optional[int] = None
         if since is not None:
             since_ms = int(since.timestamp() * 1000)
@@ -207,12 +230,12 @@ class DataEngine:
         all_candles: List[List[Any]] = []
         while True:
             try:
-                candles = self._fetch_raw(symbol, tf, since=since_ms, limit=limit)
+                candles = self._fetch_raw(resolved_symbol, tf, since=since_ms, limit=limit)
             except ccxt.BadSymbol:
-                log.error(f"Symbol not found on {self.exchange_id}: {symbol}")
+                log.error(f"Symbol not found on {self.exchange_id}: {symbol} ({resolved_symbol})")
                 return pd.DataFrame()
             except Exception as exc:
-                log.error(f"Unexpected error fetching {symbol}: {exc}")
+                log.error(f"Unexpected error fetching {symbol} ({resolved_symbol}): {exc}")
                 return pd.DataFrame()
 
             if not candles:
@@ -265,6 +288,7 @@ class DataEngine:
         Returns:
             pandas DataFrame with full history.
         """
+        resolved_symbol = self._normalize_symbol(symbol)
         tf = timeframe or self.timeframe
         since = datetime.now(timezone.utc) - timedelta(days=days)
         cache_path = self._cache_path(symbol, f"{tf}_hist")
@@ -281,7 +305,7 @@ class DataEngine:
 
         while True:
             try:
-                candles = self._fetch_raw(symbol, tf, since=since_ms, limit=limit)
+                candles = self._fetch_raw(resolved_symbol, tf, since=since_ms, limit=limit)
             except Exception as exc:
                 log.error(f"Error fetching historical data: {exc}")
                 break
@@ -340,7 +364,8 @@ class DataEngine:
             Last price as float, or 0.0 on error.
         """
         try:
-            ticker = self.exchange.fetch_ticker(symbol)
+            resolved_symbol = self._normalize_symbol(symbol)
+            ticker = self.exchange.fetch_ticker(resolved_symbol)
             return float(ticker.get("last", 0.0))
         except Exception as exc:
             log.error(f"Failed to get live price for {symbol}: {exc}")
@@ -381,6 +406,7 @@ class DataEngine:
             )
             return
 
+        resolved_symbol = self._normalize_symbol(symbol)
         tf = timeframe or self.timeframe
         exchange_upper = self.exchange_id.upper()
         exchange_pro_cls = getattr(ccxtpro, self.exchange_id, None)
@@ -394,14 +420,14 @@ class DataEngine:
             "enableRateLimit": True,
         })
 
-        log.info(f"Starting WebSocket stream: {symbol} / {tf}")
+        log.info(f"Starting WebSocket stream: {symbol} -> {resolved_symbol} / {tf}")
         try:
             while True:
                 if stop_event and stop_event.is_set():
                     log.info("WebSocket stream stopped by event.")
                     break
                 try:
-                    candles = await pro_exchange.watch_ohlcv(symbol, tf, limit=100)
+                    candles = await pro_exchange.watch_ohlcv(resolved_symbol, tf, limit=100)
                     df = self._candles_to_df(candles)
                     if callback is not None:
                         if asyncio.iscoroutinefunction(callback):
