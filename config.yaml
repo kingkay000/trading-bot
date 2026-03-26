@@ -111,3 +111,4 @@ ea_data:
   enabled: true
   stale_after_seconds: 600
   fallback_to_api: true
+
