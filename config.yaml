@@ -106,3 +106,11 @@ news:
 execution_bridge:
   enabled: true
   url: "http://0.0.0.0:10000"
+<<<<<<< codex/fix-build-errors-for-pandas-on-render-p8fp0w
+
+ea_data:
+  enabled: true
+  stale_after_seconds: 600
+  fallback_to_api: true
+=======
+>>>>>>> main
