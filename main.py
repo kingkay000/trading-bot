@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import asyncio
+from collections import deque
 import signal
 import os
 import sys
@@ -117,6 +118,25 @@ class TradingBot:
         self.bridge_cfg = self.config.get("execution_bridge", {})
         self.bridge_enabled = self.bridge_cfg.get("enabled", False)
         self.bridge_url = self.bridge_cfg.get("url", "http://localhost:8000")
+        scan_batch_cfg = self.config.get("trading", {}).get("scan_batch", {})
+        self.batch_interval_seconds = int(
+            scan_batch_cfg.get(
+                "interval_seconds", self.config.get("trading", {}).get("scan_interval", 60)
+            )
+        )
+        self.symbols_per_batch = int(
+            scan_batch_cfg.get("symbols_per_batch", len(self.config.get("trading", {}).get("symbols", [])) or 1)
+        )
+        self.max_calls_per_minute = int(scan_batch_cfg.get("max_calls_per_minute", 8))
+        self.estimated_calls_per_symbol = max(
+            1, int(scan_batch_cfg.get("estimated_calls_per_symbol", 3))
+        )
+        self._batch_cursor = 0
+        self._td_call_timestamps: deque[float] = deque()
+        self._rate_guard_enabled = (
+            self.config.get("trading", {}).get("exchange", "").lower() == "twelvedata"
+            and self.max_calls_per_minute > 0
+        )
 
         # Historical tracking for dashboard
         self.signal_history: List[Dict[str, Any]] = []
@@ -165,7 +185,10 @@ class TradingBot:
                             )
                             self._market_closed_notified = False
 
-                for symbol in self.config["trading"]["symbols"]:
+                symbols_this_cycle = self._next_symbols_batch()
+                if not symbols_this_cycle:
+                    log.warning("No symbols scheduled for this cycle. Sleeping until next interval.")
+                for symbol in symbols_this_cycle:
                     try:
                         await self.process_symbol(symbol)
                     except Exception as exc:
@@ -179,8 +202,7 @@ class TradingBot:
                         log.debug(f"Heartbeat send failed (server may not be running): {e}")
 
                 # Wait for next scan interval
-                interval = self.config["trading"].get("scan_interval", 60)
-                await asyncio.sleep(interval)
+                await asyncio.sleep(self.batch_interval_seconds)
 
         except asyncio.CancelledError:
             self.running = False
@@ -292,6 +314,68 @@ class TradingBot:
         if order.status == "filled":
             self.risk_manager.open_position(sizing)
             self.alerting_engine.notify_order_filled(order)
+
+    def _prune_call_timestamps(self) -> None:
+        """Drop Twelve Data call estimates older than 60 seconds."""
+        now = time.time()
+        while self._td_call_timestamps and now - self._td_call_timestamps[0] > 60:
+            self._td_call_timestamps.popleft()
+
+    def _reserve_call_budget(self, call_count: int) -> None:
+        """Reserve estimated Twelve Data calls for this cycle."""
+        now = time.time()
+        for _ in range(call_count):
+            self._td_call_timestamps.append(now)
+
+    def _next_symbols_batch(self) -> List[str]:
+        """Return the next symbol batch in round-robin order."""
+        symbols = list(self.config.get("trading", {}).get("symbols", []))
+        if not symbols:
+            return []
+
+        total_symbols = len(symbols)
+        batch_size = max(1, min(self.symbols_per_batch, total_symbols))
+        start = self._batch_cursor
+        selected: List[str] = []
+        for offset in range(batch_size):
+            selected.append(symbols[(start + offset) % total_symbols])
+
+        if self._rate_guard_enabled:
+            self._prune_call_timestamps()
+            calls_used_last_min = len(self._td_call_timestamps)
+            calls_remaining = max(0, self.max_calls_per_minute - calls_used_last_min)
+            max_symbols_allowed = calls_remaining // self.estimated_calls_per_symbol
+            if max_symbols_allowed <= 0:
+                log.warning(
+                    "Twelve Data call budget exhausted: used=%s, limit=%s. Deferring this cycle.",
+                    calls_used_last_min,
+                    self.max_calls_per_minute,
+                )
+                return []
+            if max_symbols_allowed < len(selected):
+                selected = selected[:max_symbols_allowed]
+
+            estimated_calls = len(selected) * self.estimated_calls_per_symbol
+            self._reserve_call_budget(estimated_calls)
+            log.info(
+                "Batch scan (rate-guarded): symbols=%s/%s selected=%s used_calls=%s remaining_calls=%s est_calls=%s",
+                len(selected),
+                total_symbols,
+                selected,
+                calls_used_last_min,
+                calls_remaining,
+                estimated_calls,
+            )
+        else:
+            log.info(
+                "Batch scan: symbols=%s/%s selected=%s",
+                len(selected),
+                total_symbols,
+                selected,
+            )
+
+        self._batch_cursor = (start + len(selected)) % total_symbols
+        return selected
 
     async def manage_open_position(self, symbol: str, df: Any) -> None:
         """Monitor and exit open positions."""
