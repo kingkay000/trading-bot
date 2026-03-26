@@ -3,11 +3,18 @@ trading:
     - "EURUSD"
     - "GBPUSD"
     - "USDJPY"
+    - "XAUUSD"
   timeframe: "1h"
   higher_timeframe: "4h"
   mode: "paper"
   exchange: "mt5"
+  fallback_exchange: "twelvedata"  # used automatically if MetaTrader5 is unavailable
   scan_interval: 60
+  scan_batch:
+    symbols_per_batch: 2
+    interval_seconds: 60
+    max_calls_per_minute: 8
+    estimated_calls_per_symbol: 3
   session_filter: true    # NEW: only trade during London/NY volatility
   wait_for_bar_close: true # Prevent scalping by waiting for candle to finish
 
@@ -94,3 +101,13 @@ news:
   skip_high_impact: true
   news_buffer_minutes: 30      # pause trading N minutes before/after
   finnhub_enabled: false       # set true and add FINNHUB_API_KEY to .env
+
+# ─── Optional Execution Bridge (FastAPI) ───────────────────────────────────
+execution_bridge:
+  enabled: true
+  url: "http://0.0.0.0:10000"
+
+ea_data:
+  enabled: true
+  stale_after_seconds: 600
+  fallback_to_api: true

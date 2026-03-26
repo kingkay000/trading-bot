@@ -24,6 +24,7 @@ import uvicorn
 import time
 import os
 from datetime import datetime, timezone
+from modules.market_data_store import market_data_store
 
 app = FastAPI(
     title="Trading Bot Execution Bridge",
@@ -33,7 +34,8 @@ app = FastAPI(
 
 # ─── Security ────────────────────────────────────────────────────────────────
 API_KEY = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
-api_key_header = APIKeyHeader(name="X-API-KEY")
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
+REQUIRE_PUSH_API_KEY = os.getenv("REQUIRE_PUSH_API_KEY", "false").lower() in ("1", "true", "yes", "on")
 
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
@@ -62,6 +64,20 @@ class BotHeartbeat(BaseModel):
     timeframes_analyzed: List[str]
     mode: str = "paper"
     total_signals_generated: int = 0
+
+
+class Candle(BaseModel):
+    t: int
+    o: float
+    h: float
+    l: float
+    c: float
+    v: float
+
+
+class DataBundle(BaseModel):
+    symbol: str
+    timeframes: Dict[str, List[Candle]]
 
 
 # ─── In-Memory State ────────────────────────────────────────────────────────
@@ -138,6 +154,28 @@ async def bot_heartbeat(heartbeat: BotHeartbeat, api_key: str = Security(get_api
     bot_status["total_signals_generated"] = heartbeat.total_signals_generated
 
     return {"status": "ok"}
+
+
+@app.post("/update-data/{symbol}")
+async def update_data(symbol: str, bundle: DataBundle, x_api_key: Optional[str] = Security(api_key_header)):
+    """
+    EA pushes multi-timeframe OHLCV bundle for low-latency local inference.
+
+    If REQUIRE_PUSH_API_KEY=true, validates X-API-KEY against EXECUTION_BRIDGE_KEY.
+    If false, header is optional but still accepted.
+    """
+    if REQUIRE_PUSH_API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Could not validate credentials")
+
+    if bundle.symbol.upper() != symbol.upper():
+        raise HTTPException(status_code=400, detail="Path symbol and payload symbol mismatch")
+
+    normalized: Dict[str, List[Dict[str, Any]]] = {}
+    for tf, candles in bundle.timeframes.items():
+        normalized[tf] = [c.model_dump() for c in candles]
+
+    summary = market_data_store.update_bundle(bundle.symbol, normalized)
+    return {"status": "ok", "ingested": summary}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -269,6 +307,7 @@ async def health_check():
         "status": "ok",
         "uptime_seconds": int(time.time() - bot_status["server_start_time"]),
         "signals_tracked": len(latest_analysis),
+        "data_freshness": market_data_store.freshness_report(),
     }
 
 
