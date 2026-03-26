@@ -50,8 +50,12 @@ class AlertingEngine:
         self.config = config
         alert_cfg = config.get("alerts", {})
         self.telegram_enabled: bool = alert_cfg.get("telegram_enabled", False)
-        self.bot_token: str = alert_cfg.get("bot_token", "")
-        self.chat_id: str = alert_cfg.get("chat_id", "")
+        self.bot_token: str = alert_cfg.get("bot_token", "") or os.getenv(
+            "TELEGRAM_BOT_TOKEN", ""
+        )
+        self.chat_id: str = alert_cfg.get("chat_id", "") or os.getenv(
+            "TELEGRAM_CHAT_ID", ""
+        )
 
         if self.telegram_enabled and (not self.bot_token or not self.chat_id):
             log.warning("Telegram alerting enabled but token or chat_id is missing.")
