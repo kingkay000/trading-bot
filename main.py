@@ -51,36 +51,19 @@ log = get_logger("trading_bot")
 
 def start_health_server(port: int) -> None:
     """
-    Start a lightweight HTTP health server for PaaS platforms (e.g. Render web services)
-    that require an open port.
+    Start the full execution bridge API server on the Render-assigned PORT.
+
+    This exposes real `/poll/{symbol}`, `/analysis/{symbol}`, `/signals/current`,
+    and `/health` endpoints required by the Expert Advisor integration.
     """
+    from modules.execution_server import app
+    import uvicorn
 
-    class _HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 - standard library handler name
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"ok")
-
-        def do_POST(self) -> None:  # noqa: N802 - standard library handler name
-            # Lightweight local bridge endpoints so this same process can accept
-            # internal sync/heartbeat posts when configured.
-            if self.path in ("/signals", "/bot/heartbeat"):
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(b'{"ok":true}')
-                return
-            self.send_response(404)
-            self.end_headers()
-
-        def log_message(self, format: str, *args: Any) -> None:  # silence stdlib noise
-            return
-
-    server = ThreadingHTTPServer(("0.0.0.0", port), _HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    log.info(f"Health server started on 0.0.0.0:{port}")
+    log.info(f"Execution bridge server started on 0.0.0.0:{port}")
 
 
 class TradingBot:
