@@ -7,12 +7,14 @@ Endpoints:
   Internal (API key required):
     POST /signals         — Bot pushes a new signal
     POST /bot/heartbeat   — Bot pushes status heartbeat each scan cycle
+    POST /position-events — Bot pushes position lifecycle events (e.g. close)
 
   Public (no API key):
     GET  /signals/current — Returns all current signals in JSON
     GET  /bot/status      — Returns bot frequency, uptime, scan stats
     GET  /analysis/{sym}  — Latest analysis for a specific symbol
     GET  /poll/{symbol}   — MQL5 EA polls for pending trade signals
+    GET  /poll/position-events/{symbol} — MQL5 EA polls for pending position events
     GET  /health          — Health check
 """
 
@@ -55,6 +57,9 @@ class TradeSignal(BaseModel):
     confidence: float
     reasoning: str = ""
     timestamp: float = time.time()
+    fundamental_rating: Optional[int] = None
+    fundamental_conviction: Optional[str] = None
+    fundamental_note: Optional[str] = None
 
 
 class BotHeartbeat(BaseModel):
@@ -80,10 +85,20 @@ class DataBundle(BaseModel):
     timeframes: Dict[str, List[Candle]]
 
 
+class PositionEvent(BaseModel):
+    symbol: str
+    event_type: str  # e.g. "POSITION_CLOSED"
+    reason: str = ""
+    exit_price: float
+    pnl: float
+    timestamp: float = time.time()
+
+
 # ─── In-Memory State ────────────────────────────────────────────────────────
 
 # Execution signals (consumed by MT5 EA)
 pending_signals: Dict[str, TradeSignal] = {}
+pending_position_events: Dict[str, List[PositionEvent]] = {}
 
 # Latest analysis per symbol (persistent until replaced)
 latest_analysis: Dict[str, TradeSignal] = {}
@@ -178,6 +193,19 @@ async def update_data(symbol: str, bundle: DataBundle, x_api_key: Optional[str] 
     return {"status": "ok", "ingested": summary}
 
 
+<<<<<<< codex/fix-build-errors-for-pandas-on-render
+@app.post("/position-events")
+async def post_position_event(event: PositionEvent, api_key: str = Security(get_api_key)):
+    """Python bot posts position lifecycle events here (e.g. close events)."""
+    symbol = event.symbol.upper()
+    if symbol not in pending_position_events:
+        pending_position_events[symbol] = []
+    pending_position_events[symbol].append(event)
+    return {"status": "queued", "symbol": symbol, "event_type": event.event_type}
+
+
+=======
+>>>>>>> main
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PUBLIC ENDPOINTS (no API key required)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -291,14 +319,40 @@ async def poll_signal(symbol: str):
         # Check if signal is too old (e.g. > 5 minutes)
         if time.time() - signal.timestamp > 300:
             return {"status": "expired"}
-        return {
+        response = {
             "status": "new_trade",
             "direction": signal.direction.upper(),
             "entry": signal.entry_price,
             "sl": signal.stop_loss,
             "tp": signal.take_profit,
         }
+        if signal.fundamental_rating is not None:
+            response["fundamental_rating"] = int(signal.fundamental_rating)
+            response["fundamental_conviction"] = (
+                signal.fundamental_conviction or "weak"
+            )
+            response["fundamental_note"] = signal.fundamental_note or ""
+        return response
     return {"status": "no_signal"}
+
+
+@app.get("/poll/position-events/{symbol}")
+async def poll_position_event(symbol: str):
+    """MQL5 EA polls this endpoint for pending position lifecycle events."""
+    queue = pending_position_events.get(symbol.upper(), [])
+    if not queue:
+        return {"status": "no_event"}
+
+    event = queue.pop(0)
+    return {
+        "status": "event",
+        "symbol": event.symbol.upper(),
+        "event_type": event.event_type,
+        "reason": event.reason,
+        "exit_price": event.exit_price,
+        "pnl": event.pnl,
+        "timestamp": event.timestamp,
+    }
 
 
 @app.get("/health")
@@ -307,6 +361,10 @@ async def health_check():
         "status": "ok",
         "uptime_seconds": int(time.time() - bot_status["server_start_time"]),
         "signals_tracked": len(latest_analysis),
+<<<<<<< codex/fix-build-errors-for-pandas-on-render
+        "pending_position_event_symbols": len(pending_position_events),
+=======
+>>>>>>> main
         "data_freshness": market_data_store.freshness_report(),
     }
 

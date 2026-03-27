@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
+from analysis.fundamental_analyst import FundamentalAnalyst
 from modules.ai_signal_engine import AISignalEngine
 from modules.alerting import AlertingEngine, Dashboard
 from modules.backtester import Backtester
@@ -112,6 +113,10 @@ class TradingBot:
         self.indicator_engine = IndicatorEngine(self.config)
         self.pattern_detector = PatternDetector(self.config)
         self.ai_signal_engine = AISignalEngine(self.config)
+        self.fundamental_analyst = FundamentalAnalyst(self.config)
+        self.fundamental_enabled = bool(
+            self.config.get("fundamental_analysis", {}).get("enabled", False)
+        )
         self.risk_manager = RiskManager(self.config)
         self.trade_monitor = TradeMonitor(config)
         self.alerting_engine = AlertingEngine(config)
@@ -273,6 +278,13 @@ class TradingBot:
         signal = self.ai_signal_engine.analyze(
             df, patterns, sr_levels, symbol, timeframe, htf_context=htf_context
         )
+        if self.fundamental_enabled:
+            signal_direction = signal.signal if signal.signal in ("BUY", "SELL") else "BUY"
+            fundamental_context = self.fundamental_analyst.analyse(
+                symbol=symbol,
+                signal_direction=signal_direction,
+            )
+            setattr(signal, "fundamental_context", fundamental_context)
 
         # Track signal history
         self.signal_history.append(
@@ -426,6 +438,20 @@ class TradingBot:
         """Monitor and exit open positions."""
         pos = self.risk_manager.open_positions[symbol]
         curr_price = self.data_engine.get_live_price(symbol)
+        if curr_price <= 0 and df is not None and not df.empty:
+            curr_price = float(df["close"].iloc[-1])
+            log.warning(
+                "Live price for %s is invalid (<=0). Using last candle close fallback: %.5f",
+                symbol,
+                curr_price,
+            )
+        if curr_price <= 0:
+            log.warning(
+                "Skipping position management for %s due to invalid current price: %s",
+                symbol,
+                curr_price,
+            )
+            return
         atr = self.risk_manager._get_atr(df)
 
         # Update trailing stop
@@ -474,6 +500,16 @@ class TradingBot:
             "reasoning": signal.reasoning,
             "timestamp": time.time()
         }
+        if self.fundamental_enabled:
+            ctx = getattr(signal, "fundamental_context", None)
+            if ctx is not None:
+                payload.update(
+                    {
+                        "fundamental_rating": int(ctx.fundamental_rating),
+                        "fundamental_conviction": ctx.fundamental_conviction,
+                        "fundamental_note": ctx.fundamental_note,
+                    }
+                )
         
         headers = {"X-API-KEY": api_key}
         requests.post(url, json=payload, headers=headers, timeout=5)

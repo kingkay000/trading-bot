@@ -67,6 +67,14 @@ ai:
     max_tokens: 1000
     temperature: 0.1
 
+fundamental_analysis:
+  enabled: false
+  lookahead_hours: 4
+  rating:
+    approval_threshold: 0.30
+    strong_threshold: 0.60
+    moderate_threshold: 0.30
+
 alerts:
   telegram_enabled: true
   bot_token: "${TELEGRAM_BOT_TOKEN}"
@@ -111,4 +119,7 @@ ea_data:
   enabled: true
   stale_after_seconds: 600
   fallback_to_api: true
+<<<<<<< codex/fix-build-errors-for-pandas-on-render
+=======
 
+>>>>>>> main
