@@ -36,6 +36,7 @@ from modules.alerting import AlertingEngine, Dashboard
 from modules.backtester import Backtester
 from modules.data_engine import DataEngine
 from modules.execution_engine import ExecutionEngine
+from modules.market_data_store import market_data_store
 from modules.trade_monitor import TradeMonitor
 from modules.indicator_engine import IndicatorEngine
 from modules.pattern_detector import PatternDetector
@@ -137,6 +138,10 @@ class TradingBot:
             self.config.get("trading", {}).get("exchange", "").lower() == "twelvedata"
             and self.max_calls_per_minute > 0
         )
+        ea_data_cfg = self.config.get("ea_data", {})
+        self.ea_data_enabled = ea_data_cfg.get("enabled", True)
+        self.ea_data_stale_after_seconds = int(ea_data_cfg.get("stale_after_seconds", 600))
+        self.ea_data_fallback_to_api = ea_data_cfg.get("fallback_to_api", True)
 
         # Historical tracking for dashboard
         self.signal_history: List[Dict[str, Any]] = []
@@ -215,13 +220,11 @@ class TradingBot:
         timeframe = self.config["trading"]["timeframe"]
         htf = self.config["trading"].get("higher_timeframe", "4h")
 
-        # 1. Fetch Data (Trading Timeframe)
-        df = self.data_engine.fetch_ohlcv(symbol, timeframe, limit=100)
+        # 1. Fetch Data (prefers EA push store, optional Twelve Data fallback)
+        df, df_htf = self._get_symbol_data(symbol, timeframe, htf)
         if df.empty:
             return
 
-        # 2. Fetch Higher Timeframe Data (MTA)
-        df_htf = self.data_engine.fetch_ohlcv(symbol, htf, limit=100)
         htf_context = {}
         if not df_htf.empty:
             df_htf = self.indicator_engine.compute_all(df_htf)
@@ -314,6 +317,48 @@ class TradingBot:
         if order.status == "filled":
             self.risk_manager.open_position(sizing)
             self.alerting_engine.notify_order_filled(order)
+
+    def _get_symbol_data(self, symbol: str, timeframe: str, higher_timeframe: str) -> Any:
+        """Return (df, df_htf) from EA push store when fresh; fallback to API if enabled."""
+        if self.ea_data_enabled:
+            df = market_data_store.get_df(
+                symbol=symbol,
+                timeframe=timeframe,
+                max_age_seconds=self.ea_data_stale_after_seconds,
+                with_indicators=True,
+            )
+            df_htf = market_data_store.get_df(
+                symbol=symbol,
+                timeframe=higher_timeframe,
+                max_age_seconds=self.ea_data_stale_after_seconds,
+                with_indicators=True,
+            )
+            if df is not None and df_htf is not None and not df.empty and not df_htf.empty:
+                return df.copy(), df_htf.copy()
+
+            if not self.ea_data_fallback_to_api:
+                log.info(
+                    "EA data for %s is missing/stale (> %ss), and fallback_to_api is disabled.",
+                    symbol,
+                    self.ea_data_stale_after_seconds,
+                )
+                return self._empty_df(), self._empty_df()
+
+            log.info(
+                "EA data for %s is missing/stale (> %ss). Falling back to API data fetch.",
+                symbol,
+                self.ea_data_stale_after_seconds,
+            )
+
+        df = self.data_engine.fetch_ohlcv(symbol, timeframe, limit=100)
+        df_htf = self.data_engine.fetch_ohlcv(symbol, higher_timeframe, limit=100)
+        return df, df_htf
+
+    @staticmethod
+    def _empty_df() -> Any:
+        import pandas as pd
+
+        return pd.DataFrame()
 
     def _prune_call_timestamps(self) -> None:
         """Drop Twelve Data call estimates older than 60 seconds."""

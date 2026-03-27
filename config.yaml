@@ -106,3 +106,9 @@ news:
 execution_bridge:
   enabled: true
   url: "http://0.0.0.0:10000"
+
+ea_data:
+  enabled: true
+  stale_after_seconds: 600
+  fallback_to_api: true
+
