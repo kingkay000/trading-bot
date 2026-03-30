@@ -202,6 +202,7 @@ async def post_position_event(event: PositionEvent, api_key: str = Security(get_
     pending_position_events[symbol].append(event)
     return {"status": "queued", "symbol": symbol, "event_type": event.event_type}
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PUBLIC ENDPOINTS (no API key required)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -357,7 +358,6 @@ async def health_check():
         "status": "ok",
         "uptime_seconds": int(time.time() - bot_status["server_start_time"]),
         "signals_tracked": len(latest_analysis),
-        "pending_position_event_symbols": len(pending_position_events),
         "pending_position_event_symbols": len(pending_position_events),
         "data_freshness": market_data_store.freshness_report(),
     }

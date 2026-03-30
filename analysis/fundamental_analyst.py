@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
 
+from analysis.fundamental_sources import FundamentalSources
+
 
 def _clamp_score(value: float) -> float:
     return max(-1.0, min(1.0, float(value)))
@@ -135,6 +137,11 @@ class FundamentalAnalyst:
         self.config = config or {}
         self.fa_cfg = self.config.get("fundamental_analysis", {})
         self.enabled = bool(self.fa_cfg.get("enabled", False))
+        self.weights = self.fa_cfg.get(
+            "weights",
+            {"cb_bias": 0.35, "calendar": 0.25, "dxy": 0.20, "sentiment": 0.20},
+        )
+        self.sources = FundamentalSources(self.config)
 
     def analyse(
         self,
@@ -194,3 +201,55 @@ class FundamentalAnalyst:
             oldest_source_age_seconds=oldest_age,
         )
 
+    def analyse_live(self, symbol: str, signal_direction: str = "BUY") -> FundamentalContext:
+        components: Dict[str, float] = {}
+        sources_used: List[str] = []
+        sources_failed: List[str] = []
+        data_age_seconds: Dict[str, float] = {}
+        caution_flag = False
+
+        w_cb = float(self.weights.get("cb_bias", 0.35))
+        cb_score, cb_used, cb_failed, cb_age = self.sources.get_cb_bias(symbol)
+        components["cb_bias"] = _clamp_score(cb_score * w_cb)
+        sources_used.extend(cb_used)
+        sources_failed.extend(cb_failed)
+        data_age_seconds.update(cb_age)
+
+        w_cal = float(self.weights.get("calendar", 0.25))
+        cal_score, cal_used, cal_failed, cal_age, cal_caution = self.sources.get_calendar_score(symbol)
+        components["calendar"] = _clamp_score(cal_score * w_cal)
+        sources_used.extend(cal_used)
+        sources_failed.extend(cal_failed)
+        data_age_seconds.update(cal_age)
+        caution_flag = caution_flag or cal_caution
+
+        w_dxy = float(self.weights.get("dxy", 0.20))
+        dxy_score, dxy_used, dxy_failed, dxy_age = self.sources.get_dxy_score(symbol)
+        components["dxy"] = _clamp_score(dxy_score * w_dxy)
+        sources_used.extend(dxy_used)
+        sources_failed.extend(dxy_failed)
+        data_age_seconds.update(dxy_age)
+
+        w_sent = float(self.weights.get("sentiment", 0.20))
+        sent_score, sent_used, sent_failed, sent_age = self.sources.get_sentiment_score(symbol)
+        components["sentiment"] = _clamp_score(sent_score * w_sent)
+        sources_used.extend(sent_used)
+        sources_failed.extend(sent_failed)
+        data_age_seconds.update(sent_age)
+
+        narrative = (
+            f"Composite score {sum(components.values()):+.2f} from "
+            f"cb={components['cb_bias']:+.2f}, cal={components['calendar']:+.2f}, "
+            f"dxy={components['dxy']:+.2f}, sent={components['sentiment']:+.2f}."
+        )
+
+        return self.analyse(
+            symbol=symbol,
+            signal_direction=signal_direction,
+            components=components,
+            caution_flag=caution_flag,
+            data_age_seconds=data_age_seconds,
+            sources_used=sorted(set(sources_used)),
+            sources_failed=sources_failed,
+            narrative=narrative,
+        )

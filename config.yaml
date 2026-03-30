@@ -68,8 +68,33 @@ ai:
     temperature: 0.1
 
 fundamental_analysis:
-  enabled: false
+  enabled: true
   lookahead_hours: 4
+  caution_flag_default: false
+  weights:
+    cb_bias: 0.35
+    calendar: 0.25
+    dxy: 0.20
+    sentiment: 0.20
+  sources:
+    cb_bias:
+      scrape_enabled: true
+      scrape_url: "https://www.centralbanknews.info/"
+      yaml_fallback_path: "data/fundamentals/cb_bias.yaml"
+      cache_ttl_seconds: 21600
+    calendar:
+      finnhub_enabled: true
+      scraping_enabled: true
+      window_back_hours: 4
+      window_forward_hours: 24
+    dxy:
+      stooq_url: "https://stooq.com/q/d/l/?s=dxy.f&i=d"
+      cache_ttl_seconds: 3600
+      proxy_symbol: "XAUUSD"
+    sentiment:
+      cnn_url: "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+      cache_ttl_seconds: 1800
+      safe_haven_symbols: ["XAUUSD", "USDJPY", "USDCHF"]
   rating:
     approval_threshold: 0.30
     strong_threshold: 0.60

@@ -280,7 +280,7 @@ class TradingBot:
         )
         if self.fundamental_enabled:
             signal_direction = signal.signal if signal.signal in ("BUY", "SELL") else "BUY"
-            fundamental_context = self.fundamental_analyst.analyse(
+            fundamental_context = self.fundamental_analyst.analyse_live(
                 symbol=symbol,
                 signal_direction=signal_direction,
             )
