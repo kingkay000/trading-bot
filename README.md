@@ -51,6 +51,7 @@ Required keys:
 | Key | Source |
 |-----|--------|
 | `BINANCE_API_KEY` / `BINANCE_API_SECRET` | [Binance API Management](https://www.binance.com/en/my/settings/api-management) |
+| `TWELVEDATA_API_KEY` | [Twelve Data API Dashboard](https://twelvedata.com/) |
 | `ANTHROPIC_API_KEY` | [Anthropic Console](https://console.anthropic.com/) |
 | `TELEGRAM_BOT_TOKEN` | Create a bot via [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHAT_ID` | Get from [@userinfobot](https://t.me/userinfobot) |

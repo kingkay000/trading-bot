@@ -50,6 +50,18 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as fh:
         raw = fh.read()
 
+    # Guard against unresolved git merge markers before YAML parsing so
+    # startup errors are deterministic and easier to diagnose.
+    conflict_patterns = ("<<<<<<<", "=======", ">>>>>>>")
+    for idx, line in enumerate(raw.splitlines(), start=1):
+        if any(line.startswith(pattern) for pattern in conflict_patterns):
+            raise ValueError(
+                "Unresolved merge conflict marker found in "
+                f"{config_path} at line {idx}: {line!r}. "
+                "Resolve conflict markers (<<<<<<<, =======, >>>>>>>) "
+                "before starting the bot."
+            )
+
     # Substitute ${VAR_NAME} with environment variable values
     def _replace_env(match: re.Match) -> str:
         var_name = match.group(1)

@@ -50,8 +50,12 @@ class AlertingEngine:
         self.config = config
         alert_cfg = config.get("alerts", {})
         self.telegram_enabled: bool = alert_cfg.get("telegram_enabled", False)
-        self.bot_token: str = alert_cfg.get("bot_token", "")
-        self.chat_id: str = alert_cfg.get("chat_id", "")
+        self.bot_token: str = alert_cfg.get("bot_token", "") or os.getenv(
+            "TELEGRAM_BOT_TOKEN", ""
+        )
+        self.chat_id: str = alert_cfg.get("chat_id", "") or os.getenv(
+            "TELEGRAM_CHAT_ID", ""
+        )
 
         if self.telegram_enabled and (not self.bot_token or not self.chat_id):
             log.warning("Telegram alerting enabled but token or chat_id is missing.")
@@ -97,6 +101,11 @@ class AlertingEngine:
 
     def notify_signal(self, signal: Any) -> None:
         """Alert on new signal generation."""
+        msg = self.format_signal_message(signal)
+        self.send_message(msg)
+
+    def format_signal_message(self, signal: Any) -> str:
+        """Build Telegram-ready signal text."""
         icon = "🚀" if signal.signal == "BUY" else "🔻"
 
         # Hold duration display
@@ -113,14 +122,47 @@ class AlertingEngine:
             f"SL: `{signal.stop_loss:.4f}`\n"
             f"TP1: `{signal.take_profit_1:.4f}`\n"
             f"TP2: `{signal.take_profit_2:.4f}`\n"
-            f"R/R: `{signal.risk_reward_ratio:.2f}`\n\n"
-            f"{hold_icon} *Hold:* `{hold_duration}`\n"
+            f"R/R: `{signal.risk_reward_ratio:.2f}`\n"
         )
+        fa_cfg = self.config.get("fundamental_analysis", {})
+        if fa_cfg.get("enabled", False):
+            fundamental_context = getattr(signal, "fundamental_context", None)
+            if fundamental_context is not None:
+                rating_map = {
+                    1: ("🟢", "SUPPORTS"),
+                    0: ("⚪", "NEUTRAL"),
+                    -1: ("🔴", "OPPOSES"),
+                }
+                conviction_map = {
+                    "strong": "★★★ Strong",
+                    "moderate": "★★☆ Moderate",
+                    "weak": "★☆☆ Weak",
+                }
+                emoji, label = rating_map.get(
+                    int(fundamental_context.fundamental_rating), ("⚪", "NEUTRAL")
+                )
+                conviction_label = conviction_map.get(
+                    str(fundamental_context.fundamental_conviction), "★☆☆ Weak"
+                )
+                msg += (
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "📊 FUNDAMENTAL ANALYSIS\n"
+                    f"Rating  : {emoji} {label} ({int(fundamental_context.fundamental_rating):+d})\n"
+                    f"Conviction: {conviction_label}\n"
+                    f"Note    : {fundamental_context.fundamental_note}\n"
+                )
+                if getattr(fundamental_context, "caution_flag", False):
+                    lookahead_hours = int(fa_cfg.get("lookahead_hours", 4))
+                    msg += (
+                        f"⚠️ High-impact event within {lookahead_hours}h — consider reducing size.\n"
+                    )
+                msg += "━━━━━━━━━━━━━━━━━━━━\n"
+
+        msg += f"\n{hold_icon} *Hold:* `{hold_duration}`\n"
         if hold_reasoning:
             msg += f"_{hold_reasoning}_\n\n"
         msg += f"*Reasoning:* {signal.reasoning}"
-
-        self.send_message(msg)
+        return msg
 
     def notify_order_filled(self, order: Any) -> None:
         """Alert on order execution."""

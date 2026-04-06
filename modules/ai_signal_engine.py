@@ -194,6 +194,7 @@ class AISignalEngine:
 
         self.primary = ai_cfg.get("primary_provider", "gemini")
         self.fallback_enabled = ai_cfg.get("fallback_enabled", True)
+        self._no_provider_logged = False
 
         # Signal thresholds
         sig_cfg = config.get("signals", {})
@@ -289,7 +290,9 @@ class AISignalEngine:
                     ordered_providers.append(p)
 
         if not ordered_providers:
-            log.error("No AI providers configured or available!")
+            if not self._no_provider_logged:
+                log.error("No AI providers configured or available!")
+                self._no_provider_logged = True
             return self._hold_signal(symbol, timeframe, "No providers available")
 
         payload_json = json.dumps(payload, indent=2)

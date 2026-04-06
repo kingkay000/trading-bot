@@ -19,20 +19,24 @@ Usage:
 
 import argparse
 import asyncio
+from collections import deque
 import signal
 import os
 import sys
 import time
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
+from analysis.fundamental_analyst import FundamentalAnalyst
 from modules.ai_signal_engine import AISignalEngine
 from modules.alerting import AlertingEngine, Dashboard
 from modules.backtester import Backtester
 from modules.data_engine import DataEngine
 from modules.execution_engine import ExecutionEngine
+from modules.market_data_store import market_data_store
 from modules.trade_monitor import TradeMonitor
 from modules.indicator_engine import IndicatorEngine
 from modules.pattern_detector import PatternDetector
@@ -45,6 +49,23 @@ from utils.market_hours import is_market_closed
 load_dotenv()
 
 log = get_logger("trading_bot")
+
+
+def start_health_server(port: int) -> None:
+    """
+    Start the full execution bridge API server on the Render-assigned PORT.
+
+    This exposes real `/poll/{symbol}`, `/analysis/{symbol}`, `/signals/current`,
+    and `/health` endpoints required by the Expert Advisor integration.
+    """
+    from modules.execution_server import app
+    import uvicorn
+
+    config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    log.info(f"Execution bridge server started on 0.0.0.0:{port}")
 
 
 class TradingBot:
@@ -61,24 +82,70 @@ class TradingBot:
             self.config["trading"]["mode"] = args.mode
 
         # Initialize Modules
-        if self.config["trading"]["exchange"] == "mt5":
-            from modules.mt5_connector import MT5Connector
+        exchange_name = self.config["trading"].get("exchange", "binance")
+        if exchange_name == "mt5":
+            try:
+                from modules.mt5_connector import MT5Connector
 
-            self.data_engine = MT5Connector(self.config)
-            self.execution_engine = self.data_engine
+                self.data_engine = MT5Connector(self.config)
+                self.execution_engine = self.data_engine
+            except ModuleNotFoundError as exc:
+                fallback_exchange = self.config["trading"].get("fallback_exchange", "twelvedata")
+                fallback_symbols = self.config["trading"].get("fallback_symbols")
+                log.warning(
+                    "MetaTrader5 is not available in this environment. "
+                    f"Falling back to '{fallback_exchange}'. Original error: {exc}"
+                )
+                self.config["trading"]["exchange"] = fallback_exchange
+                if fallback_symbols:
+                    self.config["trading"]["symbols"] = fallback_symbols
+                self.data_engine = DataEngine(self.config)
+                self.execution_engine = ExecutionEngine(
+                    self.config, exchange=getattr(self.data_engine, "exchange", None)
+                )
         else:
             self.data_engine = DataEngine(self.config)
             self.execution_engine = ExecutionEngine(
-                self.config, exchange=self.data_engine.exchange
+                self.config, exchange=getattr(self.data_engine, "exchange", None)
             )
 
         self.indicator_engine = IndicatorEngine(self.config)
         self.pattern_detector = PatternDetector(self.config)
         self.ai_signal_engine = AISignalEngine(self.config)
+        self.fundamental_analyst = FundamentalAnalyst(self.config)
+        self.fundamental_enabled = bool(
+            self.config.get("fundamental_analysis", {}).get("enabled", False)
+        )
         self.risk_manager = RiskManager(self.config)
         self.trade_monitor = TradeMonitor(config)
         self.alerting_engine = AlertingEngine(config)
         self.dashboard = Dashboard()
+        self.bridge_cfg = self.config.get("execution_bridge", {})
+        self.bridge_enabled = self.bridge_cfg.get("enabled", False)
+        self.bridge_url = self.bridge_cfg.get("url", "http://localhost:8000")
+        scan_batch_cfg = self.config.get("trading", {}).get("scan_batch", {})
+        self.batch_interval_seconds = int(
+            scan_batch_cfg.get(
+                "interval_seconds", self.config.get("trading", {}).get("scan_interval", 60)
+            )
+        )
+        self.symbols_per_batch = int(
+            scan_batch_cfg.get("symbols_per_batch", len(self.config.get("trading", {}).get("symbols", [])) or 1)
+        )
+        self.max_calls_per_minute = int(scan_batch_cfg.get("max_calls_per_minute", 8))
+        self.estimated_calls_per_symbol = max(
+            1, int(scan_batch_cfg.get("estimated_calls_per_symbol", 3))
+        )
+        self._batch_cursor = 0
+        self._td_call_timestamps: deque[float] = deque()
+        self._rate_guard_enabled = (
+            self.config.get("trading", {}).get("exchange", "").lower() == "twelvedata"
+            and self.max_calls_per_minute > 0
+        )
+        ea_data_cfg = self.config.get("ea_data", {})
+        self.ea_data_enabled = ea_data_cfg.get("enabled", True)
+        self.ea_data_stale_after_seconds = int(ea_data_cfg.get("stale_after_seconds", 600))
+        self.ea_data_fallback_to_api = ea_data_cfg.get("fallback_to_api", True)
 
         # Historical tracking for dashboard
         self.signal_history: List[Dict[str, Any]] = []
@@ -127,21 +194,24 @@ class TradingBot:
                             )
                             self._market_closed_notified = False
 
-                for symbol in self.config["trading"]["symbols"]:
+                symbols_this_cycle = self._next_symbols_batch()
+                if not symbols_this_cycle:
+                    log.warning("No symbols scheduled for this cycle. Sleeping until next interval.")
+                for symbol in symbols_this_cycle:
                     try:
                         await self.process_symbol(symbol)
                     except Exception as exc:
                         log.error(f"Error processing {symbol}: {exc}", exc_info=True)
 
                 # Send heartbeat to execution server after each scan cycle
-                try:
-                    self._send_heartbeat()
-                except Exception as e:
-                    log.debug(f"Heartbeat send failed (server may not be running): {e}")
+                if self.bridge_enabled:
+                    try:
+                        self._send_heartbeat()
+                    except Exception as e:
+                        log.debug(f"Heartbeat send failed (server may not be running): {e}")
 
                 # Wait for next scan interval
-                interval = self.config["trading"].get("scan_interval", 60)
-                await asyncio.sleep(interval)
+                await asyncio.sleep(self.batch_interval_seconds)
 
         except asyncio.CancelledError:
             self.running = False
@@ -154,13 +224,11 @@ class TradingBot:
         timeframe = self.config["trading"]["timeframe"]
         htf = self.config["trading"].get("higher_timeframe", "4h")
 
-        # 1. Fetch Data (Trading Timeframe)
-        df = self.data_engine.fetch_ohlcv(symbol, timeframe, limit=100)
+        # 1. Fetch Data (prefers EA push store, optional Twelve Data fallback)
+        df, df_htf = self._get_symbol_data(symbol, timeframe, htf)
         if df.empty:
             return
 
-        # 2. Fetch Higher Timeframe Data (MTA)
-        df_htf = self.data_engine.fetch_ohlcv(symbol, htf, limit=100)
         htf_context = {}
         if not df_htf.empty:
             df_htf = self.indicator_engine.compute_all(df_htf)
@@ -209,6 +277,13 @@ class TradingBot:
         signal = self.ai_signal_engine.analyze(
             df, patterns, sr_levels, symbol, timeframe, htf_context=htf_context
         )
+        if self.fundamental_enabled:
+            signal_direction = signal.signal if signal.signal in ("BUY", "SELL") else "BUY"
+            fundamental_context = self.fundamental_analyst.analyse_live(
+                symbol=symbol,
+                signal_direction=signal_direction,
+            )
+            setattr(signal, "fundamental_context", fundamental_context)
 
         # Track signal history
         self.signal_history.append(
@@ -254,10 +329,147 @@ class TradingBot:
             self.risk_manager.open_position(sizing)
             self.alerting_engine.notify_order_filled(order)
 
+    def _get_symbol_data(self, symbol: str, timeframe: str, higher_timeframe: str) -> Any:
+        """Return (df, df_htf) from EA push store when fresh; fallback to API if enabled."""
+        if self.ea_data_enabled:
+            df = market_data_store.get_df(
+                symbol=symbol,
+                timeframe=timeframe,
+                max_age_seconds=self.ea_data_stale_after_seconds,
+                with_indicators=True,
+            )
+            df_htf = market_data_store.get_df(
+                symbol=symbol,
+                timeframe=higher_timeframe,
+                max_age_seconds=self.ea_data_stale_after_seconds,
+                with_indicators=True,
+            )
+            if df is not None and df_htf is not None and not df.empty and not df_htf.empty:
+                return df.copy(), df_htf.copy()
+
+            freshness = market_data_store.freshness_report().get(symbol.upper(), {})
+            missing_tfs = [tf for tf in (timeframe, higher_timeframe) if tf not in freshness]
+            stale_tfs: List[str] = []
+            fresh_tfs: List[str] = []
+            for tf in (timeframe, higher_timeframe):
+                tf_state = freshness.get(tf)
+                if not tf_state:
+                    continue
+                if tf_state.get("age_seconds", self.ea_data_stale_after_seconds + 1) > self.ea_data_stale_after_seconds:
+                    stale_tfs.append(f"{tf}:{tf_state.get('age_seconds')}s")
+                else:
+                    fresh_tfs.append(f"{tf}:{tf_state.get('age_seconds')}s")
+
+            if not self.ea_data_fallback_to_api:
+                log.info(
+                    "EA data unavailable for %s (missing_tfs=%s stale_tfs=%s fresh_tfs=%s, max_age=%ss), and fallback_to_api is disabled.",
+                    symbol,
+                    missing_tfs,
+                    stale_tfs,
+                    fresh_tfs,
+                    self.ea_data_stale_after_seconds,
+                )
+                return self._empty_df(), self._empty_df()
+
+            log.info(
+                "EA data unavailable for %s (missing_tfs=%s stale_tfs=%s fresh_tfs=%s, max_age=%ss). Falling back to API data fetch.",
+                symbol,
+                missing_tfs,
+                stale_tfs,
+                fresh_tfs,
+                self.ea_data_stale_after_seconds,
+            )
+
+        df = self.data_engine.fetch_ohlcv(symbol, timeframe, limit=100)
+        df_htf = self.data_engine.fetch_ohlcv(symbol, higher_timeframe, limit=100)
+        return df, df_htf
+
+    @staticmethod
+    def _empty_df() -> Any:
+        import pandas as pd
+
+        return pd.DataFrame()
+
+    def _prune_call_timestamps(self) -> None:
+        """Drop Twelve Data call estimates older than 60 seconds."""
+        now = time.time()
+        while self._td_call_timestamps and now - self._td_call_timestamps[0] > 60:
+            self._td_call_timestamps.popleft()
+
+    def _reserve_call_budget(self, call_count: int) -> None:
+        """Reserve estimated Twelve Data calls for this cycle."""
+        now = time.time()
+        for _ in range(call_count):
+            self._td_call_timestamps.append(now)
+
+    def _next_symbols_batch(self) -> List[str]:
+        """Return the next symbol batch in round-robin order."""
+        symbols = list(self.config.get("trading", {}).get("symbols", []))
+        if not symbols:
+            return []
+
+        total_symbols = len(symbols)
+        batch_size = max(1, min(self.symbols_per_batch, total_symbols))
+        start = self._batch_cursor
+        selected: List[str] = []
+        for offset in range(batch_size):
+            selected.append(symbols[(start + offset) % total_symbols])
+
+        if self._rate_guard_enabled:
+            self._prune_call_timestamps()
+            calls_used_last_min = len(self._td_call_timestamps)
+            calls_remaining = max(0, self.max_calls_per_minute - calls_used_last_min)
+            max_symbols_allowed = calls_remaining // self.estimated_calls_per_symbol
+            if max_symbols_allowed <= 0:
+                log.warning(
+                    "Twelve Data call budget exhausted: used=%s, limit=%s. Deferring this cycle.",
+                    calls_used_last_min,
+                    self.max_calls_per_minute,
+                )
+                return []
+            if max_symbols_allowed < len(selected):
+                selected = selected[:max_symbols_allowed]
+
+            estimated_calls = len(selected) * self.estimated_calls_per_symbol
+            self._reserve_call_budget(estimated_calls)
+            log.info(
+                "Batch scan (rate-guarded): symbols=%s/%s selected=%s used_calls=%s remaining_calls=%s est_calls=%s",
+                len(selected),
+                total_symbols,
+                selected,
+                calls_used_last_min,
+                calls_remaining,
+                estimated_calls,
+            )
+        else:
+            log.info(
+                "Batch scan: symbols=%s/%s selected=%s",
+                len(selected),
+                total_symbols,
+                selected,
+            )
+
+        self._batch_cursor = (start + len(selected)) % total_symbols
+        return selected
+
     async def manage_open_position(self, symbol: str, df: Any) -> None:
         """Monitor and exit open positions."""
         pos = self.risk_manager.open_positions[symbol]
         curr_price = self.data_engine.get_live_price(symbol)
+        if curr_price <= 0 and df is not None and not df.empty:
+            curr_price = float(df["close"].iloc[-1])
+            log.warning(
+                "Live price for %s is invalid (<=0). Using last candle close fallback: %.5f",
+                symbol,
+                curr_price,
+            )
+        if curr_price <= 0:
+            log.warning(
+                "Skipping position management for %s due to invalid current price: %s",
+                symbol,
+                curr_price,
+            )
+            return
         atr = self.risk_manager._get_atr(df)
 
         # Update trailing stop
@@ -286,12 +498,24 @@ class TradingBot:
                 self.alerting_engine.notify_position_closed(
                     symbol, pnl, reason, order.price
                 )
+                try:
+                    self._send_position_event(
+                        symbol=symbol,
+                        event_type="POSITION_CLOSED",
+                        reason=reason,
+                        exit_price=float(order.price),
+                        pnl=float(pnl),
+                    )
+                except Exception as exc:
+                    log.debug(f"Position event send failed (server may not be running): {exc}")
 
     def _sync_signal_to_server(self, signal: Any) -> None:
         """Helper to push the latest AI analysis to the execution server."""
+        if not self.bridge_enabled:
+            return
         import requests
         
-        url = "http://localhost:8000/signals"
+        url = f"{self._bridge_base_url()}/signals"
         api_key = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
         
         payload = {
@@ -304,15 +528,27 @@ class TradingBot:
             "reasoning": signal.reasoning,
             "timestamp": time.time()
         }
+        if self.fundamental_enabled:
+            ctx = getattr(signal, "fundamental_context", None)
+            if ctx is not None:
+                payload.update(
+                    {
+                        "fundamental_rating": int(ctx.fundamental_rating),
+                        "fundamental_conviction": ctx.fundamental_conviction,
+                        "fundamental_note": ctx.fundamental_note,
+                    }
+                )
         
         headers = {"X-API-KEY": api_key}
         requests.post(url, json=payload, headers=headers, timeout=5)
 
     def _send_heartbeat(self) -> None:
         """Send a status heartbeat to the execution server after each scan cycle."""
+        if not self.bridge_enabled:
+            return
         import requests
 
-        url = "http://localhost:8000/bot/heartbeat"
+        url = f"{self._bridge_base_url()}/bot/heartbeat"
         api_key = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
 
         timeframes = [
@@ -336,6 +572,32 @@ class TradingBot:
 
         headers = {"X-API-KEY": api_key}
         requests.post(url, json=payload, headers=headers, timeout=5)
+
+    def _send_position_event(
+        self, symbol: str, event_type: str, reason: str, exit_price: float, pnl: float
+    ) -> None:
+        """Push position lifecycle events for EA state reconciliation."""
+        if not self.bridge_enabled:
+            return
+        import requests
+
+        url = f"{self._bridge_base_url()}/position-events"
+        api_key = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
+        payload = {
+            "symbol": symbol,
+            "event_type": event_type,
+            "reason": reason,
+            "exit_price": exit_price,
+            "pnl": pnl,
+            "timestamp": time.time(),
+        }
+        headers = {"X-API-KEY": api_key}
+        requests.post(url, json=payload, headers=headers, timeout=5)
+
+    def _bridge_base_url(self) -> str:
+        """Normalize bridge URL for loopback calls inside the same process."""
+        base = self.bridge_url.rstrip("/")
+        return base.replace("://0.0.0.0", "://127.0.0.1")
 
     async def run_backtest(self) -> None:
         """Run backtesting mode for multiple timeframes and exit."""
@@ -367,6 +629,15 @@ def main():
 
     # Configure Logging
     configure_from_config(config)
+
+    # Render web services expect a bound port; keep a tiny health endpoint open.
+    # Do this after logging setup so bind failures are visible in logs.
+    port = os.getenv("PORT")
+    if port and not args.backtest:
+        try:
+            start_health_server(int(port))
+        except Exception:
+            log.exception(f"Failed to start health server on PORT={port}")
 
     # Initialize Bot
     bot = TradingBot(config, args)

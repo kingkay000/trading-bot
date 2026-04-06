@@ -7,12 +7,14 @@ Endpoints:
   Internal (API key required):
     POST /signals         — Bot pushes a new signal
     POST /bot/heartbeat   — Bot pushes status heartbeat each scan cycle
+    POST /position-events — Bot pushes position lifecycle events (e.g. close)
 
   Public (no API key):
     GET  /signals/current — Returns all current signals in JSON
     GET  /bot/status      — Returns bot frequency, uptime, scan stats
     GET  /analysis/{sym}  — Latest analysis for a specific symbol
     GET  /poll/{symbol}   — MQL5 EA polls for pending trade signals
+    GET  /poll/position-events/{symbol} — MQL5 EA polls for pending position events
     GET  /health          — Health check
 """
 
@@ -24,6 +26,7 @@ import uvicorn
 import time
 import os
 from datetime import datetime, timezone
+from modules.market_data_store import market_data_store
 
 app = FastAPI(
     title="Trading Bot Execution Bridge",
@@ -33,7 +36,8 @@ app = FastAPI(
 
 # ─── Security ────────────────────────────────────────────────────────────────
 API_KEY = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
-api_key_header = APIKeyHeader(name="X-API-KEY")
+api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
+REQUIRE_PUSH_API_KEY = os.getenv("REQUIRE_PUSH_API_KEY", "false").lower() in ("1", "true", "yes", "on")
 
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
@@ -53,6 +57,9 @@ class TradeSignal(BaseModel):
     confidence: float
     reasoning: str = ""
     timestamp: float = time.time()
+    fundamental_rating: Optional[int] = None
+    fundamental_conviction: Optional[str] = None
+    fundamental_note: Optional[str] = None
 
 
 class BotHeartbeat(BaseModel):
@@ -64,10 +71,34 @@ class BotHeartbeat(BaseModel):
     total_signals_generated: int = 0
 
 
+class Candle(BaseModel):
+    t: int
+    o: float
+    h: float
+    l: float
+    c: float
+    v: float
+
+
+class DataBundle(BaseModel):
+    symbol: str
+    timeframes: Dict[str, List[Candle]]
+
+
+class PositionEvent(BaseModel):
+    symbol: str
+    event_type: str  # e.g. "POSITION_CLOSED"
+    reason: str = ""
+    exit_price: float
+    pnl: float
+    timestamp: float = time.time()
+
+
 # ─── In-Memory State ────────────────────────────────────────────────────────
 
 # Execution signals (consumed by MT5 EA)
 pending_signals: Dict[str, TradeSignal] = {}
+pending_position_events: Dict[str, List[PositionEvent]] = {}
 
 # Latest analysis per symbol (persistent until replaced)
 latest_analysis: Dict[str, TradeSignal] = {}
@@ -138,6 +169,38 @@ async def bot_heartbeat(heartbeat: BotHeartbeat, api_key: str = Security(get_api
     bot_status["total_signals_generated"] = heartbeat.total_signals_generated
 
     return {"status": "ok"}
+
+
+@app.post("/update-data/{symbol}")
+async def update_data(symbol: str, bundle: DataBundle, x_api_key: Optional[str] = Security(api_key_header)):
+    """
+    EA pushes multi-timeframe OHLCV bundle for low-latency local inference.
+
+    If REQUIRE_PUSH_API_KEY=true, validates X-API-KEY against EXECUTION_BRIDGE_KEY.
+    If false, header is optional but still accepted.
+    """
+    if REQUIRE_PUSH_API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Could not validate credentials")
+
+    if bundle.symbol.upper() != symbol.upper():
+        raise HTTPException(status_code=400, detail="Path symbol and payload symbol mismatch")
+
+    normalized: Dict[str, List[Dict[str, Any]]] = {}
+    for tf, candles in bundle.timeframes.items():
+        normalized[tf] = [c.model_dump() for c in candles]
+
+    summary = market_data_store.update_bundle(bundle.symbol, normalized)
+    return {"status": "ok", "ingested": summary}
+
+
+@app.post("/position-events")
+async def post_position_event(event: PositionEvent, api_key: str = Security(get_api_key)):
+    """Python bot posts position lifecycle events here (e.g. close events)."""
+    symbol = event.symbol.upper()
+    if symbol not in pending_position_events:
+        pending_position_events[symbol] = []
+    pending_position_events[symbol].append(event)
+    return {"status": "queued", "symbol": symbol, "event_type": event.event_type}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -253,14 +316,40 @@ async def poll_signal(symbol: str):
         # Check if signal is too old (e.g. > 5 minutes)
         if time.time() - signal.timestamp > 300:
             return {"status": "expired"}
-        return {
+        response = {
             "status": "new_trade",
             "direction": signal.direction.upper(),
             "entry": signal.entry_price,
             "sl": signal.stop_loss,
             "tp": signal.take_profit,
         }
+        if signal.fundamental_rating is not None:
+            response["fundamental_rating"] = int(signal.fundamental_rating)
+            response["fundamental_conviction"] = (
+                signal.fundamental_conviction or "weak"
+            )
+            response["fundamental_note"] = signal.fundamental_note or ""
+        return response
     return {"status": "no_signal"}
+
+
+@app.get("/poll/position-events/{symbol}")
+async def poll_position_event(symbol: str):
+    """MQL5 EA polls this endpoint for pending position lifecycle events."""
+    queue = pending_position_events.get(symbol.upper(), [])
+    if not queue:
+        return {"status": "no_event"}
+
+    event = queue.pop(0)
+    return {
+        "status": "event",
+        "symbol": event.symbol.upper(),
+        "event_type": event.event_type,
+        "reason": event.reason,
+        "exit_price": event.exit_price,
+        "pnl": event.pnl,
+        "timestamp": event.timestamp,
+    }
 
 
 @app.get("/health")
@@ -269,6 +358,8 @@ async def health_check():
         "status": "ok",
         "uptime_seconds": int(time.time() - bot_status["server_start_time"]),
         "signals_tracked": len(latest_analysis),
+        "pending_position_event_symbols": len(pending_position_events),
+        "data_freshness": market_data_store.freshness_report(),
     }
 
 

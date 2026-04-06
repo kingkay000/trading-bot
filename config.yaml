@@ -3,11 +3,18 @@ trading:
     - "EURUSD"
     - "GBPUSD"
     - "USDJPY"
+    - "XAUUSD"
   timeframe: "1h"
   higher_timeframe: "4h"
   mode: "paper"
   exchange: "mt5"
+  fallback_exchange: "twelvedata"  # used automatically if MetaTrader5 is unavailable
   scan_interval: 60
+  scan_batch:
+    symbols_per_batch: 2
+    interval_seconds: 60
+    max_calls_per_minute: 8
+    estimated_calls_per_symbol: 3
   session_filter: true    # NEW: only trade during London/NY volatility
   wait_for_bar_close: true # Prevent scalping by waiting for candle to finish
 
@@ -60,6 +67,39 @@ ai:
     max_tokens: 1000
     temperature: 0.1
 
+fundamental_analysis:
+  enabled: true
+  lookahead_hours: 4
+  caution_flag_default: false
+  weights:
+    cb_bias: 0.35
+    calendar: 0.25
+    dxy: 0.20
+    sentiment: 0.20
+  sources:
+    cb_bias:
+      scrape_enabled: true
+      scrape_url: "https://www.centralbanknews.info/"
+      yaml_fallback_path: "data/fundamentals/cb_bias.yaml"
+      cache_ttl_seconds: 21600
+    calendar:
+      finnhub_enabled: true
+      scraping_enabled: true
+      window_back_hours: 4
+      window_forward_hours: 24
+    dxy:
+      stooq_url: "https://stooq.com/q/d/l/?s=dxy.f&i=d"
+      cache_ttl_seconds: 3600
+      proxy_symbol: "XAUUSD"
+    sentiment:
+      cnn_url: "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+      cache_ttl_seconds: 1800
+      safe_haven_symbols: ["XAUUSD", "USDJPY", "USDCHF"]
+  rating:
+    approval_threshold: 0.30
+    strong_threshold: 0.60
+    moderate_threshold: 0.30
+
 alerts:
   telegram_enabled: true
   bot_token: "${TELEGRAM_BOT_TOKEN}"
@@ -94,3 +134,13 @@ news:
   skip_high_impact: true
   news_buffer_minutes: 30      # pause trading N minutes before/after
   finnhub_enabled: false       # set true and add FINNHUB_API_KEY to .env
+
+# ─── Optional Execution Bridge (FastAPI) ───────────────────────────────────
+execution_bridge:
+  enabled: true
+  url: "http://0.0.0.0:10000"
+
+ea_data:
+  enabled: true
+  stale_after_seconds: 600
+  fallback_to_api: true
