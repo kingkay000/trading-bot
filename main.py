@@ -499,6 +499,16 @@ class TradingBot:
                 self.alerting_engine.notify_position_closed(
                     symbol, pnl, reason, order.price
                 )
+                try:
+                    self._send_position_event(
+                        symbol=symbol,
+                        event_type="POSITION_CLOSED",
+                        reason=reason,
+                        exit_price=float(order.price),
+                        pnl=float(pnl),
+                    )
+                except Exception as exc:
+                    log.debug(f"Position event send failed (server may not be running): {exc}")
 
     def _sync_signal_to_server(self, signal: Any) -> None:
         """Helper to push the latest AI analysis to the execution server."""
@@ -561,6 +571,27 @@ class TradingBot:
             "total_signals_generated": len(self.signal_history),
         }
 
+        headers = {"X-API-KEY": api_key}
+        requests.post(url, json=payload, headers=headers, timeout=5)
+
+    def _send_position_event(
+        self, symbol: str, event_type: str, reason: str, exit_price: float, pnl: float
+    ) -> None:
+        """Push position lifecycle events for EA state reconciliation."""
+        if not self.bridge_enabled:
+            return
+        import requests
+
+        url = f"{self._bridge_base_url()}/position-events"
+        api_key = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
+        payload = {
+            "symbol": symbol,
+            "event_type": event_type,
+            "reason": reason,
+            "exit_price": exit_price,
+            "pnl": pnl,
+            "timestamp": time.time(),
+        }
         headers = {"X-API-KEY": api_key}
         requests.post(url, json=payload, headers=headers, timeout=5)
 
