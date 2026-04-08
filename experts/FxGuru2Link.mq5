@@ -161,12 +161,22 @@ void HandlePositionClosedEvent(int idx, string json) {
 }
 
 void PollForSignals(int idx) {
-   // preserved from original EA - intentionally omitted for brevity in this repo copy.
+   if(idx < 0 || idx >= ArraySize(Symbols)) return;
+   string sym = Symbols[idx];
+   string result;
+   int code = SendGetRequest(ApiBaseUrl + "/poll/" + sym, result);
+   if(code != 200) return;
+   if(StringFind(result, "\"new_trade\"") >= 0)
+      ExecuteTradeFromJSON(idx, result);
 }
 
 void PerformHandshake() {
    string response;
    int code = SendGetRequest(ApiBaseUrl + "/health", response);
+   if(code == 4060 || code == 4014) {
+      CurrentState = STATE_ERROR_RECOVERY;
+      return;
+   }
    if(code == 200) {
       CurrentState      = STATE_POLLING;
       NextPollTime      = TimeCurrent();
@@ -184,9 +194,72 @@ int SendGetRequest(string url, string &response) {
       headers += "X-API-KEY: " + ApiKey + "\r\n";
 
    int ret = WebRequest("GET", url, headers, 5000, data, res, response);
-   if(ret == -1) return -1;
+   if(ret == -1) {
+      int err = GetLastError();
+      if(err == 4060) return 4060;
+      if(err == 4014) {
+         Print("╔══════════════════════════════════════════════════════════╗");
+         Print("║  CRITICAL: Error 4014 — WebRequest is globally disabled  ║");
+         Print("║  Tools → Options → Expert Advisors                       ║");
+         Print("║  Tick: 'Allow WebRequest for listed URL'                 ║");
+         Print("║  Then add your ApiBaseUrl to the allowed list            ║");
+         Print("╚══════════════════════════════════════════════════════════╝");
+         return 4014;
+      }
+      PrintFormat("[NET][GET] Error %d -> %s", err, url);
+      return -1;
+   }
    response = CharArrayToString(res);
    return ret;
+}
+
+int SendPostRequest(string url, string payload, string &response) {
+   char data[], res[];
+   StringToCharArray(payload, data, 0, StringLen(payload));
+   string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
+   if(EnableApiKeyHeader && StringLen(ApiKey) > 0)
+      headers += "X-API-KEY: " + ApiKey + "\r\n";
+
+   int ret = WebRequest("POST", url, headers, 10000, data, res, response);
+   if(ret == -1) {
+      int err = GetLastError();
+      if(err == 4060) return 4060;
+      if(err == 4014) {
+         Print("╔══════════════════════════════════════════════════════════╗");
+         Print("║  CRITICAL: Error 4014 — WebRequest is globally disabled  ║");
+         Print("║  Tools → Options → Expert Advisors                       ║");
+         Print("║  Tick: 'Allow WebRequest for listed URL'                 ║");
+         Print("║  Then add your ApiBaseUrl to the allowed list            ║");
+         Print("╚══════════════════════════════════════════════════════════╝");
+         return 4014;
+      }
+      PrintFormat("[NET][POST] Error %d -> %s", err, url);
+      return -1;
+   }
+   response = CharArrayToString(res);
+   return ret;
+}
+
+void ExecuteTradeFromJSON(int idx, string json) {
+   string sym = Symbols[idx];
+   string dir = GetJsonValue(json, "direction");
+   if(StringLen(dir) == 0) return;
+
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
+      Print("[EXEC] AutoTrading is disabled in terminal. Click the AutoTrading button in the MT5 toolbar.");
+      return;
+   }
+   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)) {
+      Print("[EXEC] Trading is not allowed on this account. Check account permissions or contact your broker.");
+      return;
+   }
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) {
+      Print("[EXEC] EA does not have trade permission. Check 'Allow Algo Trading' in EA properties (F7).");
+      return;
+   }
+
+   // Intentionally minimal execution stub in this repo copy.
+   if(DebugLogs) PrintFormat("[EXEC][%s] Trade signal received: %s", sym, dir);
 }
 
 string GetJsonValue(string json, string key) {
