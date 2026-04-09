@@ -161,10 +161,10 @@ class TradingBot:
         log.info(f"Bot starting... Mode: {self.execution_engine.mode.upper()}")
 
         # Send startup alert
-        self.alerting_engine.send_message(
-            f"🚀 *AI Trading Bot Started*\nMode: `{self.execution_engine.mode.upper()}`\nSymbols: `{self.config['trading']['symbols']}`",
-            silent=True,
-        )
+        #self.alerting_engine.send_message(
+        #    f"🚀 *AI Trading Bot Started*\nMode: `{self.execution_engine.mode.upper()}`\nSymbols: `{self.config['trading']['symbols']}`",
+        #    silent=True,
+        #)
 
         # Run Dashboard in parallel if not in backtest mode
         dashboard_task = asyncio.create_task(self.dashboard.run_live(self))
@@ -309,10 +309,6 @@ class TradingBot:
         # Record signal time for cooldown
         self.last_signal_time[symbol] = datetime.now(timezone.utc)
 
-        # Notify on potentially actionable signal (high confidence)
-        if signal.confidence >= 50:
-            self.alerting_engine.notify_signal(signal)
-
         # 6. Risk Management Evaluation
         approved, sizing = self.risk_manager.evaluate_signal(signal, df, symbol)
 
@@ -321,6 +317,10 @@ class TradingBot:
                 f"Signal rejected by RiskManager for {symbol}: {sizing.rejection_reason}"
             )
             return
+
+        # ✅ Notify on potentially actionable signal (high confidence + risk approved)
+        if signal.confidence >= 50:
+            self.alerting_engine.notify_signal(signal)
 
         # 7. Execution
         current_price = self.data_engine.get_live_price(symbol)
