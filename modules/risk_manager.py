@@ -129,13 +129,13 @@ class RiskManager:
     ) -> None:
         risk_cfg = config.get("risk", {})
         self.max_risk_per_trade: float = risk_cfg.get("max_risk_per_trade", 0.015)
-        self.max_open_trades: int = risk_cfg.get("max_open_trades", 3)
+        self.max_open_trades: int = risk_cfg.get("max_open_trades", 5)
         self.max_daily_loss: float = risk_cfg.get("max_daily_loss", 0.05)
-        self.min_rr_ratio: float = risk_cfg.get("min_rr_ratio", 1.5)
+        self.min_rr_ratio: float = risk_cfg.get("min_rr_ratio", 1.0)
         self.atr_multiplier: float = risk_cfg.get("atr_multiplier", 1.5)
         self.tp1_multiplier: float = risk_cfg.get("tp1_multiplier", 1.5)
         self.tp2_multiplier: float = risk_cfg.get("tp2_multiplier", 3.0)
-        self.max_trades_per_day: int = risk_cfg.get("max_trades_per_day", 5)
+        self.max_trades_per_day: int = risk_cfg.get("max_trades_per_day", 7)
 
         # Journaling setup
         self.journal_path = os.path.join("logs", "trade_journal.csv")
@@ -248,11 +248,23 @@ class RiskManager:
             log.info(f"Signal rejected (max trades): {sym}")
             return False, sizing
 
-        # 3. Already in a position for this symbol
-        if sym in self.open_positions:
-            sizing.rejection_reason = f"Already in an open position for {sym}"
-            return False, sizing
+        # *****OLD CODE***** 3. Already in a position for this symbol
+        #if sym in self.open_positions:
+        #    sizing.rejection_reason = f"Already in an open position for {sym}"
+        #    return False, sizing
 
+        # 3. Already in a position for this symbol - allow opposite direction
+        if sym in self.open_positions:
+            existing_pos = self.open_positions[sym]
+            # Allow opposite direction signals to close the old position and open a new one
+            if signal.signal == "BUY" and existing_pos.direction == "long":
+                sizing.rejection_reason = f"Already in a LONG position for {sym}"
+                return False, sizing
+            elif signal.signal == "SELL" and existing_pos.direction == "short":
+                sizing.rejection_reason = f"Already in a SHORT position for {sym}"
+                return False, sizing
+            # Opposite direction is allowed - will close old and open new
+      
         # 4. Correlation check (avoid multiple positions in highly correlated pairs)
         if self._is_highly_correlated_open(sym):
             sizing.rejection_reason = (
