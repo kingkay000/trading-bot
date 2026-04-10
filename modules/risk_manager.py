@@ -394,9 +394,8 @@ class RiskManager:
         )
         return pos
 
-    def close_position(
-        self, symbol: str, close_price: float, reason: str = ""
-    ) -> float:
+    def close_position(self, symbol: str, close_price: float, reason: str = "", 
+                       order_id: str = "") -> float:
         """
         Close an open position and update daily P&L.
 
@@ -419,11 +418,12 @@ class RiskManager:
 
         log.info(
             f"Position closed: {symbol} @ {close_price:.4f} | "
-            f"P&L = {pnl:+.2f} | reason={reason}"
+            f"P&L = {pnl:+.2f} | reason={reason} | order_id={order_id}"
         )
 
+
         # Record to trade journal
-        self._log_trade(pos, close_price, pnl, reason)
+        self._log_trade(pos, close_price, pnl, reason, order_id=order_id)
 
         # Check daily loss limit
         daily_loss_pct = -self.daily_pnl / self.initial_balance
