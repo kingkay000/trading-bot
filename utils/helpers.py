@@ -191,34 +191,49 @@ def pct_change(old_price: float, new_price: float) -> float:
         return 0.0
     return (new_price - old_price) / old_price
 
-
 def calc_position_size(
+    symbol: str,
     account_balance: float,
     risk_pct: float,
     entry_price: float,
     stop_loss_price: float,
 ) -> float:
     """
-    Calculate position size based on fixed-fractional risk.
-
-    Formula:
-        position_size = (account_balance × risk_pct) / |entry - stop_loss|
+    Calculate position size in LOTS based on fixed-fractional risk.
+    Internally manages contract sizes for Forex and Gold (XAU).
 
     Args:
+        symbol:          Trading pair (e.g., 'EURUSD', 'XAUUSD').
         account_balance: Total account equity in quote currency.
         risk_pct:        Risk fraction per trade (e.g. 0.015 = 1.5%).
         entry_price:     Planned entry price.
         stop_loss_price: Stop-loss price.
 
     Returns:
-        Position size in base currency units.
+        Position size in LOTS (rounded to 2 decimal places).
     """
+    # 1. Internal Contract Size Management
+    sym = symbol.upper()
+    if "XAU" in sym or "GOLD" in sym:
+        contract_size = 100  # Gold (1 Lot = 100oz)
+    else:
+        contract_size = 100000  # Forex (1 Lot = 100,000 units)
+
+    # 2. Risk Math
     risk_amount = account_balance * risk_pct
     price_risk = abs(entry_price - stop_loss_price)
+
     if price_risk == 0:
         return 0.0
-    return risk_amount / price_risk
 
+    # 3. Units to Lots Calculation
+    # Formula: (Total Cash Risk / Price Difference) / Units per Lot
+    total_units = risk_amount / price_risk
+    lot_size = total_units / contract_size
+
+    # 4. Standard Broker Rounding
+    # Most brokers allow 0.01 (Micro Lots) as minimum
+    return round(lot_size, 2)
 
 def calc_stop_loss(
     entry_price: float,
