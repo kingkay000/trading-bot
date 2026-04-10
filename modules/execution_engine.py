@@ -250,6 +250,10 @@ class ExecutionEngine:
         amount = sizing.position_size
         price = sizing.entry_price if sizing.entry_price > 0 else current_price
 
+        # Add fallback
+        if current_price <= 0:
+            current_price = sizing.entry_price
+      
         log.info(
             f"Placing {self.mode.upper()} {side.upper()} order: "
             f"{symbol} | size={amount:.6f} | price={price:.4f}"
