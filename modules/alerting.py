@@ -182,13 +182,14 @@ class AlertingEngine:
         )
         self.send_message(msg)
 
-    def notify_position_closed(
-        self, symbol: str, pnl: float, reason: str, price: float
-    ) -> None:
+    def notify_position_closed(self, symbol: str, pnl: float, reason: str, 
+                              price: float, order_id: str = "") -> None:
         """Alert on position closure."""
         icon = "💰" if pnl >= 0 else "❌"
+        id_line = f"Order ID: `{order_id}`\n" if order_id else ""
         msg = (
             f"{icon} *POSITION CLOSED ({symbol})* {icon}\n"
+            f"{id_line}"
             f"Reason: `{reason}`\n"
             f"Exit Price: `{price:.4f}`\n"
             f"P&L: *{pnl:+.2f} USDT*"
