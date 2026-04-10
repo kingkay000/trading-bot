@@ -499,16 +499,16 @@ class TradingBot:
             self.alerting_engine.notify_position_closed(
                 symbol, pnl, reason, order.price, order_id=order.order_id  # ← Pass order_id
             )
-                try:
-                    self._send_position_event(
-                        symbol=symbol,
-                        event_type="POSITION_CLOSED",
-                        reason=reason,
-                        exit_price=float(order.price),
-                        pnl=float(pnl),
-                    )
-                except Exception as exc:
-                    log.debug(f"Position event send failed (server may not be running): {exc}")
+            try:
+                self._send_position_event(
+                    symbol=symbol,
+                    event_type="POSITION_CLOSED",
+                    reason=reason,
+                    exit_price=float(order.price),
+                    pnl=float(pnl),
+                )
+            except Exception as exc:
+                log.debug(f"Position event send failed (server may not be running): {exc}")
 
     def _sync_signal_to_server(self, signal: Any) -> None:
         """Helper to push the latest AI analysis to the execution server."""
