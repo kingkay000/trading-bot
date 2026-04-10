@@ -334,6 +334,7 @@ class RiskManager:
 
         # 8. Position sizing
         pos_size = calc_position_size(
+            sym,
             self.account_balance,
             self.max_risk_per_trade,
             entry,
