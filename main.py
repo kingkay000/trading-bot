@@ -492,13 +492,13 @@ class TradingBot:
                 symbol, pos.position_size, curr_price, pos.direction, reason=reason
             )
 
-            if order.status == "filled":
-                pnl = self.risk_manager.close_position(
-                    symbol, order.price, reason=reason
-                )
-                self.alerting_engine.notify_position_closed(
-                    symbol, pnl, reason, order.price
-                )
+        if order.status == "filled":
+            pnl = self.risk_manager.close_position(
+                symbol, order.price, reason=reason, order_id=order.order_id  # ← Pass order_id
+            )
+            self.alerting_engine.notify_position_closed(
+                symbol, pnl, reason, order.price, order_id=order.order_id  # ← Pass order_id
+            )
                 try:
                     self._send_position_event(
                         symbol=symbol,
