@@ -279,7 +279,11 @@ class TradingBot:
             df, patterns, sr_levels, symbol, timeframe, htf_context=htf_context
         )
         if self.fundamental_enabled:
-            signal_direction = signal.signal if signal.signal in ("BUY", "SELL") else "BUY"
+            signal_direction = (
+                str(signal.signal).upper()
+                if str(signal.signal).upper() in ("BUY", "SELL")
+                else "BUY"
+            )
             fundamental_context = self.fundamental_analyst.analyse_live(
                 symbol=symbol,
                 signal_direction=signal_direction,
@@ -297,12 +301,6 @@ class TradingBot:
             }
         )
 
-        # Sync all signals to Execution Server for MT5 Dashboard
-        try:
-            self._sync_signal_to_server(signal)
-        except Exception as e:
-            log.warning(f"Failed to sync signal to server: {e}")
-
         if signal.signal == "HOLD":
             return
 
@@ -318,6 +316,12 @@ class TradingBot:
             )
             return
 
+        # Sync only approved, actionable signals to Execution Server
+        try:
+            self._sync_signal_to_server(signal)
+        except Exception as e:
+            log.warning(f"Failed to sync signal to server: {e}")
+
         # ✅ Notify on potentially actionable signal (high confidence + risk approved)
         if signal.confidence >= 50:
             self.alerting_engine.notify_signal(signal)
@@ -328,7 +332,11 @@ class TradingBot:
 
         if order.status == "filled":
             self.risk_manager.open_position(sizing)
-            self.alerting_engine.notify_order_filled(order)
+            self.alerting_engine.notify_order_filled(
+                order,
+                account_balance=self.risk_manager.account_balance,
+                risk_amount=sizing.risk_amount,
+            )
 
     def _get_symbol_data(self, symbol: str, timeframe: str, higher_timeframe: str) -> Any:
         """Return (df, df_htf) from EA push store when fresh; fallback to API if enabled."""

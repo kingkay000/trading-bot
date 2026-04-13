@@ -33,6 +33,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from utils.helpers import contract_size_for_symbol
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -106,7 +107,8 @@ class AlertingEngine:
 
     def format_signal_message(self, signal: Any) -> str:
         """Build Telegram-ready signal text."""
-        icon = "🚀" if signal.signal == "BUY" else "🔻"
+        signal_side = str(signal.signal).upper()
+        icon = "🚀" if signal_side == "BUY" else "🔻"
 
         # Hold duration display
         hold_icons = {"SCALP": "⚡", "INTRADAY": "☀️", "SWING": "🌊"}
@@ -116,7 +118,7 @@ class AlertingEngine:
 
         msg = (
             f"{icon} *NEW SIGNAL: {signal.symbol}* {icon}\n"
-            f"Direction: `{signal.signal}`\n"
+            f"Direction: `{signal_side}`\n"
             f"Confidence: `{signal.confidence}%`\n"
             f"Entry: `{signal.entry_price:.4f}`\n"
             f"SL: `{signal.stop_loss:.4f}`\n"
@@ -164,20 +166,38 @@ class AlertingEngine:
         msg += f"*Reasoning:* {signal.reasoning}"
         return msg
 
-    def notify_order_filled(self, order: Any) -> None:
+    def notify_order_filled(
+        self,
+        order: Any,
+        account_balance: Optional[float] = None,
+        risk_amount: Optional[float] = None,
+    ) -> None:
         """Alert on order execution."""
-        # Calculate lot size normalized to $1000 account
-        # Amount in base currency * entry price = notional value
-        notional_value = order.amount * order.price if order.price > 0 else 0
-        lot_size_per_1k = (notional_value / 1000.0) if notional_value > 0 else 0
+        symbol = str(order.symbol)
+        if "/" in symbol:
+            base_asset = symbol.split("/")[0]
+        elif len(symbol) >= 6:
+            base_asset = symbol[:3]
+        else:
+            base_asset = symbol
+
+        # order.amount is base units; convert to lots for FX-style display.
+        contract_size = contract_size_for_symbol(symbol)
+        lot_size = (order.amount / contract_size) if contract_size > 0 else 0.0
     
         msg = (
             f"✅ *ORDER FILLED ({order.symbol})*\n"
             f"ID: `{order.order_id}`\n"
             f"Side: `{order.side.upper()}`\n"
             f"Price: `{order.price:.4f}`\n"
-            f"Amount: `{order.amount:.6f} {order.symbol.split('/')[0]}`\n"
-            f"Lot Size: `{lot_size_per_1k:.2f}x per $1K`\n"
+            f"Amount: `{order.amount:.2f} {base_asset}`\n"
+            f"Lot Size: `{lot_size:.2f} lots`\n"
+        )
+        if account_balance is not None:
+            msg += f"Account Balance: `${account_balance:,.2f}`\n"
+        if risk_amount is not None:
+            msg += f"Risk Amount: `${risk_amount:,.2f}`\n"
+        msg += (
             f"Mode: `{'Paper' if order.is_paper else 'Live'}`"
         )
         self.send_message(msg)

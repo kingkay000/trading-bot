@@ -199,8 +199,7 @@ def calc_position_size(
     stop_loss_price: float,
 ) -> float:
     """
-    Calculate position size in LOTS based on fixed-fractional risk.
-    Internally manages contract sizes for Forex and Gold (XAU).
+    Calculate position size in BASE UNITS based on fixed-fractional risk.
 
     Args:
         symbol:          Trading pair (e.g., 'EURUSD', 'XAUUSD').
@@ -210,32 +209,34 @@ def calc_position_size(
         stop_loss_price: Stop-loss price.
 
     Returns:
-        Position size in LOTS (rounded to 2 decimal places).
+        Position size in base units.
     """
-    # 1. Normalize symbol string
-    sym = str(symbol).upper().strip()
-    
-    # 2. Robust Contract Size Logic
-    if any(keyword in sym for keyword in ["XAU", "GOLD", "XAG", "SILVER"]):
-        contract_size = 100  # Commodities
-    else:
-        contract_size = 100000  # Forex (1 Lot = 100,000 units)
+    # Kept symbol parameter for API compatibility and potential future
+    # symbol-specific sizing logic.
+    _ = str(symbol).upper().strip()
 
-    # 3. Risk Math
+    # Risk Math
     risk_amount = account_balance * risk_pct
     price_risk = abs(entry_price - stop_loss_price)
 
     if price_risk == 0:
         return 0.0
 
-    # 4. Units to Lots Calculation
-    # Formula: (Total Cash Risk / Price Difference) / Units per Lot
-    total_units = risk_amount / price_risk
-    lot_size = total_units / contract_size
+    # Position sizing in base units:
+    #   risk_amount = abs(entry - stop) * units
+    # => units = risk_amount / abs(entry - stop)
+    units = risk_amount / price_risk
+    return round(units, 6)
 
-    # 5. Standard Broker Rounding
-    # Most brokers allow 0.01 (Micro Lots) as minimum
-    return round(lot_size, 2)
+
+def contract_size_for_symbol(symbol: str) -> int:
+    """
+    Return standard contract size used to convert units -> lots for display.
+    """
+    sym = str(symbol).upper().strip()
+    if any(keyword in sym for keyword in ["XAU", "GOLD", "XAG", "SILVER"]):
+        return 100
+    return 100000
 
 def calc_stop_loss(
     entry_price: float,
