@@ -6,6 +6,7 @@ MetaTrader 5 connector that acts as both a DataEngine and ExecutionEngine.
 
 import os
 import time
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -13,6 +14,7 @@ import MetaTrader5 as mt5
 
 from modules.execution_engine import OrderResult
 from modules.risk_manager import PositionSizing
+from utils.helpers import contract_size_for_symbol
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -119,22 +121,44 @@ class MT5Connector:
             return 0.0
         return tick.bid
 
+    def _normalize_lot(self, symbol: str, lot: float) -> float:
+        """Normalize lot size to broker min/step constraints."""
+        info = mt5.symbol_info(symbol) if self.active else None
+        min_lot = float(getattr(info, "volume_min", self.default_lot) or self.default_lot)
+        step = float(getattr(info, "volume_step", 0.01) or 0.01)
+        max_lot = float(getattr(info, "volume_max", 100.0) or 100.0)
+
+        lot = max(min_lot, min(lot, max_lot))
+        lot_steps = math.floor((lot + 1e-12) / step)
+        normalized = round(lot_steps * step, 8)
+        return max(min_lot, normalized)
+
     def place_order(self, sizing: PositionSizing, current_price: float) -> OrderResult:
         """Place a market order based on PositionSizing."""
         symbol = sizing.symbol
         side = "buy" if sizing.direction == "long" else "sell"
 
-        # Parse amount (lot size). For forex, use MT5 config lot size if sizing.position_size is raw USDT.
-        # In a real system, compute lots from risk. Here we use the default lot size from config.
-        lot = self.default_lot
+        # Risk manager provides base units. MT5 requires lots.
+        contract_size = contract_size_for_symbol(symbol)
+        desired_units = max(float(sizing.position_size), 0.0)
+        raw_lot = (
+            desired_units / contract_size
+            if contract_size > 0
+            else self.default_lot
+        )
+        lot = self._normalize_lot(symbol, raw_lot if raw_lot > 0 else self.default_lot)
+        executed_units = lot * contract_size
 
         if self.mode == "paper":
-            log.info(f"PAPER TRADE: {side.upper()} {lot} {symbol} at {current_price}")
+            log.info(
+                f"PAPER TRADE: {side.upper()} {symbol} at {current_price} "
+                f"| units={executed_units:.4f} lots={lot:.2f}"
+            )
             return OrderResult(
                 order_id=f"PAPER-{int(time.time())}",
                 symbol=symbol,
                 side=side,
-                amount=lot,
+                amount=executed_units,
                 price=current_price,
                 status="filled",
                 is_paper=True,
@@ -176,7 +200,7 @@ class MT5Connector:
             order_id=str(result.order),
             symbol=symbol,
             side=side,
-            amount=lot,
+            amount=executed_units,
             price=result.price,
             status="filled",
             is_paper=False,
@@ -246,7 +270,7 @@ class MT5Connector:
             order_id=str(result.order),
             symbol=symbol,
             side=side,
-            amount=position.volume,
+            amount=float(position.volume) * contract_size_for_symbol(symbol),
             price=result.price,
             status="filled",
             is_paper=False,

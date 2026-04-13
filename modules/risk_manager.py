@@ -253,14 +253,16 @@ class RiskManager:
         #    sizing.rejection_reason = f"Already in an open position for {sym}"
         #    return False, sizing
 
+        signal_side = str(signal.signal).upper()
+
         # 3. Already in a position for this symbol - allow opposite direction
         if sym in self.open_positions:
             existing_pos = self.open_positions[sym]
             # Allow opposite direction signals to close the old position and open a new one
-            if signal.signal == "BUY" and existing_pos.direction == "long":
+            if signal_side == "BUY" and existing_pos.direction == "long":
                 sizing.rejection_reason = f"Already in a LONG position for {sym}"
                 return False, sizing
-            elif signal.signal == "SELL" and existing_pos.direction == "short":
+            elif signal_side == "SELL" and existing_pos.direction == "short":
                 sizing.rejection_reason = f"Already in a SHORT position for {sym}"
                 return False, sizing
             # Opposite direction is allowed - will close old and open new
@@ -301,7 +303,7 @@ class RiskManager:
 
         # 6. Compute ATR-based levels
         atr = self._get_atr(df)
-        direction = "long" if signal.signal == "BUY" else "short"
+        direction = "long" if signal_side == "BUY" else "short"
 
         # Use Claude-suggested entry, override stops with ATR-based levels
         entry = signal.entry_price if signal.entry_price > 0 else self._last_close(df)
