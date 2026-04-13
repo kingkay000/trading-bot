@@ -25,24 +25,27 @@ from utils.logger import get_logger
 log = get_logger(__name__)
 
 # ─── System prompt for all providers ───────────────────
-SYSTEM_PROMPT = """You are an expert quantitative technical analyst and algorithmic trader with 20+ years of experience. 
-You analyze cryptocurrency market data, technical indicators, and chart patterns to generate precise trading signals.
+SYSTEM_PROMPT = """You are an expert quantitative technical analyst and algorithmic trader with 20+ years of experience.
+You analyze forex/crypto market data, technical indicators, and chart patterns to generate precise trading signals.
 
 You will receive a JSON object containing:
 - The last 50 OHLCV candles
-- Computed technical indicators
-- Detected candlestick and chart patterns
-- Key support and resistance levels
-- SMC Filters: Liquidity Sweeps, Break of Structure (BOS), and Consolidation/Range markers
+- Precomputed technical indicators
+- Precomputed pattern and structure detections
+- Precomputed deterministic confluence scores/tier
+- Precomputed trade blueprint (entry / SL / TP / RR)
+- Risk constraints from Python (including minimum RR)
 
 Your task:
-1. Perform a thorough multi-factor technical analysis
-2. Pay special attention to institutional flow:
+1. Use the precomputed fields as the authoritative source of calculations.
+2. Perform a thorough multi-factor technical analysis.
+3. Pay special attention to institutional flow:
    - LIQUIDITY SWEEPS often mark reversals; avoid buying at the top of a sweep.
    - BREAK OF STRUCTURE (BOS) confirms trend shifts.
    - CONSOLIDATION means high risk of fakeouts; wait for clear expansion.
-3. Weigh the evidence from indicators, patterns, and structure
-4. Generate a high-precision trading signal
+4. Weigh the evidence from indicators, patterns, structure, and confluence tier.
+5. Generate a high-precision trading signal.
+6. Do NOT invent indicator values that are missing from payload.
 
 ⚠️ CRITICAL: You MUST respond with ONLY a valid JSON object — no markdown, no explanation, no backticks.
 The JSON must exactly follow this schema:
@@ -244,6 +247,7 @@ class AISignalEngine:
         symbol: str = "",
         timeframe: str = "",
         htf_context: Optional[Dict[str, Any]] = None,
+        precomputed_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         window = df.iloc[-50:].copy()
         ohlcv_records = []
@@ -275,6 +279,7 @@ class AISignalEngine:
             "patterns": [p.to_dict() if hasattr(p, "to_dict") else p for p in patterns],
             "sr": [round(l, 6) for l in sr_levels],
             "higher_timeframe_context": htf_context or {},
+            "precomputed_context": precomputed_context or {},
         }
 
     def get_signal(
@@ -324,9 +329,10 @@ class AISignalEngine:
         symbol: str = "",
         timeframe: str = "",
         htf_context: Optional[Dict[str, Any]] = None,
+        precomputed_context: Optional[Dict[str, Any]] = None,
     ) -> TradeSignal:
         payload = self.build_payload(
-            df, patterns, sr_levels, symbol, timeframe, htf_context
+            df, patterns, sr_levels, symbol, timeframe, htf_context, precomputed_context
         )
         return self.get_signal(payload, symbol, timeframe)
 
