@@ -136,6 +136,9 @@ class RiskManager:
         self.tp1_multiplier: float = risk_cfg.get("tp1_multiplier", 1.5)
         self.tp2_multiplier: float = risk_cfg.get("tp2_multiplier", 3.0)
         self.max_trades_per_day: int = risk_cfg.get("max_trades_per_day", 7)
+        self.opposite_signal_confidence: float = risk_cfg.get(
+            "opposite_signal_confidence", 85.0
+        )
 
         # Journaling setup
         self.journal_path = os.path.join("logs", "trade_journal.csv")
@@ -241,7 +244,7 @@ class RiskManager:
             return False, sizing
 
         # 3. Max open trades
-        if len(self.open_positions) >= self.max_open_trades:
+        if len(self.open_positions) >= self.max_open_trades and sym not in self.open_positions:
             sizing.rejection_reason = (
                 f"Max open trades reached ({self.max_open_trades})"
             )
@@ -265,7 +268,13 @@ class RiskManager:
             elif signal_side == "SELL" and existing_pos.direction == "short":
                 sizing.rejection_reason = f"Already in a SHORT position for {sym}"
                 return False, sizing
-            # Opposite direction is allowed - will close old and open new
+            # Opposite direction is only allowed for high-conviction reversals.
+            if signal.confidence < self.opposite_signal_confidence:
+                sizing.rejection_reason = (
+                    f"Opposite signal confidence too low for reversal: "
+                    f"{signal.confidence:.1f} < {self.opposite_signal_confidence:.1f}"
+                )
+                return False, sizing
       
         # 4. Correlation check (avoid multiple positions in highly correlated pairs)
         if self._is_highly_correlated_open(sym):

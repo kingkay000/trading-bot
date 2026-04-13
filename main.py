@@ -253,10 +253,9 @@ class TradingBot:
         if htf_context:
             htf_context["slope"] = slope
 
-        # 5. Check for active position
+        # 5. Check for active position and keep it managed while evaluating reversals.
         if symbol in self.risk_manager.open_positions:
             await self.manage_open_position(symbol, df)
-            return
 
         # 5.5 Bar Close Logic (Prevents Scalping)
         last_ts = df.index[-1]
@@ -315,6 +314,45 @@ class TradingBot:
                 f"Signal rejected by RiskManager for {symbol}: {sizing.rejection_reason}"
             )
             return
+
+        existing_position = self.risk_manager.open_positions.get(symbol)
+        if existing_position and sizing.direction != existing_position.direction:
+            current_price = self.data_engine.get_live_price(symbol)
+            if current_price <= 0:
+                current_price = float(df["close"].iloc[-1])
+
+            reason = (
+                f"High-confidence reversal ({signal.signal} {signal.confidence:.1f}%)"
+            )
+            close_order = self.execution_engine.close_position(
+                symbol=symbol,
+                amount=existing_position.position_size,
+                price=current_price,
+                direction=existing_position.direction,
+                reason=reason,
+            )
+
+            if close_order.status != "filled":
+                log.warning(
+                    "Reversal close failed for %s, skipping new entry. order_status=%s",
+                    symbol,
+                    close_order.status,
+                )
+                return
+
+            pnl = self.risk_manager.close_position(
+                symbol,
+                close_order.price,
+                reason=reason,
+                order_id=close_order.order_id,
+            )
+            self.alerting_engine.notify_position_closed(
+                symbol,
+                pnl,
+                reason,
+                close_order.price,
+                order_id=close_order.order_id,
+            )
 
         # Sync only approved, actionable signals to Execution Server
         try:
@@ -500,23 +538,23 @@ class TradingBot:
                 symbol, pos.position_size, curr_price, pos.direction, reason=reason
             )
 
-        if order.status == "filled":
-            pnl = self.risk_manager.close_position(
-                symbol, order.price, reason=reason, order_id=order.order_id  # ← Pass order_id
-            )
-            self.alerting_engine.notify_position_closed(
-                symbol, pnl, reason, order.price, order_id=order.order_id  # ← Pass order_id
-            )
-            try:
-                self._send_position_event(
-                    symbol=symbol,
-                    event_type="POSITION_CLOSED",
-                    reason=reason,
-                    exit_price=float(order.price),
-                    pnl=float(pnl),
+            if order.status == "filled":
+                pnl = self.risk_manager.close_position(
+                    symbol, order.price, reason=reason, order_id=order.order_id  # ← Pass order_id
                 )
-            except Exception as exc:
-                log.debug(f"Position event send failed (server may not be running): {exc}")
+                self.alerting_engine.notify_position_closed(
+                    symbol, pnl, reason, order.price, order_id=order.order_id  # ← Pass order_id
+                )
+                try:
+                    self._send_position_event(
+                        symbol=symbol,
+                        event_type="POSITION_CLOSED",
+                        reason=reason,
+                        exit_price=float(order.price),
+                        pnl=float(pnl),
+                    )
+                except Exception as exc:
+                    log.debug(f"Position event send failed (server may not be running): {exc}")
 
     def _sync_signal_to_server(self, signal: Any) -> None:
         """Helper to push the latest AI analysis to the execution server."""
