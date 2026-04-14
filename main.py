@@ -173,6 +173,10 @@ class TradingBot:
         self.ea_data_enabled = ea_data_cfg.get("enabled", True)
         self.ea_data_stale_after_seconds = int(ea_data_cfg.get("stale_after_seconds", 600))
         self.ea_data_fallback_to_api = ea_data_cfg.get("fallback_to_api", True)
+        self.ea_api_fallback_symbols = {
+            str(s).upper().replace("/", "")
+            for s in ea_data_cfg.get("api_fallback_symbols", self.config.get("trading", {}).get("symbols", []))
+        }
 
         # Historical tracking for dashboard
         self.signal_history: List[Dict[str, Any]] = []
@@ -530,6 +534,7 @@ class TradingBot:
 
     def _get_symbol_data(self, symbol: str, timeframe: str, higher_timeframe: str) -> Any:
         """Return (df, df_htf) from EA push store when fresh; fallback to API if enabled."""
+        symbol_key = symbol.upper().replace("/", "")
         if self.ea_data_enabled:
             df = market_data_store.get_df(
                 symbol=symbol,
@@ -562,6 +567,16 @@ class TradingBot:
             if not self.ea_data_fallback_to_api:
                 log.info(
                     "EA data unavailable for %s (missing_tfs=%s stale_tfs=%s fresh_tfs=%s, max_age=%ss), and fallback_to_api is disabled.",
+                    symbol,
+                    missing_tfs,
+                    stale_tfs,
+                    fresh_tfs,
+                    self.ea_data_stale_after_seconds,
+                )
+                return self._empty_df(), self._empty_df()
+            if symbol_key not in self.ea_api_fallback_symbols:
+                log.info(
+                    "EA data unavailable for %s (missing_tfs=%s stale_tfs=%s fresh_tfs=%s, max_age=%ss), and API fallback is disabled for this symbol.",
                     symbol,
                     missing_tfs,
                     stale_tfs,

@@ -4,6 +4,15 @@ trading:
     - "GBPUSD"
     - "USDJPY"
     - "XAUUSD"
+    - "AUDUSD"
+    - "USDCAD"
+    - "USDCHF"
+    - "NZDUSD"
+  fallback_symbols:
+    - "EURUSD"
+    - "GBPUSD"
+    - "USDJPY"
+    - "XAUUSD"
   timeframe: "1h"
   higher_timeframe: "4h"
   mode: "paper"
@@ -156,3 +165,4 @@ ea_data:
   enabled: true
   stale_after_seconds: 600
   fallback_to_api: true
+  api_fallback_symbols: ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]
