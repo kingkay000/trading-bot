@@ -79,6 +79,15 @@ python main.py --mode live
 python main.py --backtest
 ```
 
+### Test Environment Bootstrap (Pyenv)
+
+If tests fail due to missing dependencies, bootstrap a local test env:
+
+```bash
+bash scripts/setup_test_env.sh
+python scripts/verify_env.py
+```
+
 ---
 
 ## Project Structure

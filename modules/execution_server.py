@@ -16,15 +16,25 @@ Endpoints:
     GET  /poll/{symbol}   — MQL5 EA polls for pending trade signals
     GET  /poll/position-events/{symbol} — MQL5 EA polls for pending position events
     GET  /health          — Health check
+
+  Debug (API key + DEBUG_ENDPOINTS_ENABLED=true):
+    POST /debug/signal/inject
+    POST /debug/signal/auto-direction/{symbol}
+    POST /debug/position-event/inject
+    GET  /debug/bridge/state
+    POST /debug/bridge/reset
+    GET  /debug/contract/self-test
 """
 
 from fastapi import FastAPI, HTTPException, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 import uvicorn
 import time
 import os
+import uuid
 from datetime import datetime, timezone
 from modules.market_data_store import market_data_store
 
@@ -34,10 +44,26 @@ app = FastAPI(
     version="2.0.0",
 )
 
+# ─── CORS (browser-based debug/testing clients) ──────────────────────────────
+cors_origins_raw = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+if cors_origins_raw == "*":
+    cors_origins = ["*"]
+else:
+    cors_origins = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=False,  # keep '*' compatible for browser debug tools
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ─── Security ────────────────────────────────────────────────────────────────
 API_KEY = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
 api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
 REQUIRE_PUSH_API_KEY = os.getenv("REQUIRE_PUSH_API_KEY", "false").lower() in ("1", "true", "yes", "on")
+DEBUG_ENDPOINTS_ENABLED = os.getenv("DEBUG_ENDPOINTS_ENABLED", "false").lower() in ("1", "true", "yes", "on")
 
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
@@ -49,6 +75,8 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
 # ─── Models ──────────────────────────────────────────────────────────────────
 
 class TradeSignal(BaseModel):
+    contract_version: Optional[str] = "fxguru-v1"
+    signal_uuid: Optional[str] = None
     symbol: str
     direction: str  # "long" | "short" | "hold" | "BUY" | "SELL"
     entry_price: float
@@ -94,6 +122,46 @@ class PositionEvent(BaseModel):
     timestamp: float = time.time()
 
 
+class DebugSignalRequest(BaseModel):
+    symbol: str
+    direction: str  # BUY | SELL | HOLD
+    entry: float = 0.0
+    sl: float = 0.0
+    tp: float = 0.0
+    confidence: float = 55.0
+    reasoning: str = "debug injection"
+
+
+def _ensure_debug_enabled() -> None:
+    if not DEBUG_ENDPOINTS_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail="Debug endpoints disabled. Set DEBUG_ENDPOINTS_ENABLED=true.",
+        )
+
+
+def _enqueue_signal(sig: TradeSignal) -> Dict[str, Any]:
+    latest_analysis[sig.symbol] = sig
+    if sig.direction.upper() in ["LONG", "SHORT", "BUY", "SELL"]:
+        pending_signals[sig.symbol] = sig
+    signal_history.append(
+        {
+            "contract_version": sig.contract_version,
+            "signal_uuid": sig.signal_uuid,
+            "symbol": sig.symbol,
+            "direction": sig.direction.upper(),
+            "confidence": sig.confidence,
+            "entry_price": sig.entry_price,
+            "stop_loss": sig.stop_loss,
+            "take_profit": sig.take_profit,
+            "reasoning": sig.reasoning,
+            "timestamp": sig.timestamp,
+            "received_at": time.time(),
+        }
+    )
+    return {"status": "queued", "symbol": sig.symbol, "signal_uuid": sig.signal_uuid}
+
+
 # ─── In-Memory State ────────────────────────────────────────────────────────
 
 # Execution signals (consumed by MT5 EA)
@@ -105,6 +173,7 @@ latest_analysis: Dict[str, TradeSignal] = {}
 
 # Signal history (all signals ever generated this session)
 signal_history: List[Dict[str, Any]] = []
+processed_signal_ids: Dict[str, float] = {}
 
 # Bot operational status
 bot_status: Dict[str, Any] = {
@@ -127,6 +196,17 @@ bot_status: Dict[str, Any] = {
 @app.post("/signals")
 async def post_signal(signal: TradeSignal, api_key: str = Security(get_api_key)):
     """Python bot posts a signal here."""
+    now = time.time()
+    # prune stale idempotency ids (1 hour)
+    stale = [k for k, ts in processed_signal_ids.items() if now - ts > 3600]
+    for k in stale:
+        processed_signal_ids.pop(k, None)
+
+    if signal.signal_uuid:
+        if signal.signal_uuid in processed_signal_ids:
+            return {"status": "duplicate", "symbol": signal.symbol}
+        processed_signal_ids[signal.signal_uuid] = now
+
     latest_analysis[signal.symbol] = signal
 
     if signal.direction.upper() in ["LONG", "SHORT", "BUY", "SELL"]:
@@ -134,6 +214,8 @@ async def post_signal(signal: TradeSignal, api_key: str = Security(get_api_key))
 
     # Track in history
     signal_record = {
+        "contract_version": signal.contract_version,
+        "signal_uuid": signal.signal_uuid,
         "symbol": signal.symbol,
         "direction": signal.direction.upper(),
         "confidence": signal.confidence,
@@ -318,6 +400,8 @@ async def poll_signal(symbol: str):
             return {"status": "expired"}
         response = {
             "status": "new_trade",
+            "contract_version": signal.contract_version or "fxguru-v1",
+            "signal_uuid": signal.signal_uuid,
             "direction": signal.direction.upper(),
             "entry": signal.entry_price,
             "sl": signal.stop_loss,
@@ -360,6 +444,129 @@ async def health_check():
         "signals_tracked": len(latest_analysis),
         "pending_position_event_symbols": len(pending_position_events),
         "data_freshness": market_data_store.freshness_report(),
+    }
+
+
+# ─── Debug Endpoints (explicitly opt-in) ────────────────────────────────────
+
+@app.post("/debug/signal/inject")
+async def debug_inject_signal(req: DebugSignalRequest, api_key: str = Security(get_api_key)):
+    _ = api_key
+    _ensure_debug_enabled()
+    direction = req.direction.upper()
+    if direction not in ("BUY", "SELL", "HOLD"):
+        raise HTTPException(status_code=400, detail="direction must be BUY|SELL|HOLD")
+    sig = TradeSignal(
+        contract_version="fxguru-v1",
+        signal_uuid=uuid.uuid4().hex,
+        symbol=req.symbol.upper(),
+        direction=direction,
+        entry_price=float(req.entry),
+        stop_loss=float(req.sl),
+        take_profit=float(req.tp),
+        confidence=float(req.confidence),
+        reasoning=req.reasoning,
+        timestamp=time.time(),
+    )
+    return _enqueue_signal(sig)
+
+
+@app.post("/debug/signal/auto-direction/{symbol}")
+async def debug_auto_direction_signal(
+    symbol: str,
+    timeframe: str = "1h",
+    lookback: int = 12,
+    api_key: str = Security(get_api_key),
+):
+    _ = api_key
+    _ensure_debug_enabled()
+    df = market_data_store.get_df(symbol.upper(), timeframe, max_age_seconds=1800, with_indicators=False)
+    if df is None or df.empty or len(df) < max(3, lookback):
+        raise HTTPException(status_code=400, detail="Insufficient fresh market data")
+    tail = df.tail(lookback)
+    first_close = float(tail["close"].iloc[0])
+    last_close = float(tail["close"].iloc[-1])
+    direction = "BUY" if last_close > first_close else "SELL" if last_close < first_close else "HOLD"
+    if direction == "BUY":
+        sl = last_close * 0.998
+        tp = last_close * 1.003
+    elif direction == "SELL":
+        sl = last_close * 1.002
+        tp = last_close * 0.997
+    else:
+        sl = last_close
+        tp = last_close
+    sig = TradeSignal(
+        contract_version="fxguru-v1",
+        signal_uuid=uuid.uuid4().hex,
+        symbol=symbol.upper(),
+        direction=direction,
+        entry_price=last_close,
+        stop_loss=sl,
+        take_profit=tp,
+        confidence=55.0,
+        reasoning=f"debug auto-direction from {lookback} {timeframe} candles",
+        timestamp=time.time(),
+    )
+    return _enqueue_signal(sig)
+
+
+@app.post("/debug/position-event/inject")
+async def debug_inject_position_event(event: PositionEvent, api_key: str = Security(get_api_key)):
+    _ = api_key
+    _ensure_debug_enabled()
+    symbol = event.symbol.upper()
+    pending_position_events.setdefault(symbol, []).append(event)
+    return {"status": "queued", "symbol": symbol, "event_type": event.event_type}
+
+
+@app.get("/debug/bridge/state")
+async def debug_bridge_state(api_key: str = Security(get_api_key)):
+    _ = api_key
+    _ensure_debug_enabled()
+    return {
+        "pending_signals": list(pending_signals.keys()),
+        "pending_position_events": {k: len(v) for k, v in pending_position_events.items()},
+        "latest_analysis_symbols": list(latest_analysis.keys()),
+        "processed_signal_ids": len(processed_signal_ids),
+        "data_freshness": market_data_store.freshness_report(),
+    }
+
+
+@app.post("/debug/bridge/reset")
+async def debug_bridge_reset(api_key: str = Security(get_api_key)):
+    _ = api_key
+    _ensure_debug_enabled()
+    pending_signals.clear()
+    pending_position_events.clear()
+    latest_analysis.clear()
+    processed_signal_ids.clear()
+    return {"status": "reset"}
+
+
+@app.get("/debug/contract/self-test")
+async def debug_contract_self_test(api_key: str = Security(get_api_key)):
+    _ = api_key
+    _ensure_debug_enabled()
+    return {
+        "poll_contract_example": {
+            "status": "new_trade",
+            "contract_version": "fxguru-v1",
+            "signal_uuid": "<uuid>",
+            "direction": "BUY",
+            "entry": 1.2345,
+            "sl": 1.23,
+            "tp": 1.24,
+        },
+        "position_event_contract_example": {
+            "status": "event",
+            "symbol": "EURUSD",
+            "event_type": "POSITION_CLOSED",
+            "reason": "manual close",
+            "exit_price": 1.2340,
+            "pnl": 12.5,
+            "timestamp": time.time(),
+        },
     }
 
 

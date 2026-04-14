@@ -132,6 +132,7 @@ class RiskManager:
         self.max_open_trades: int = risk_cfg.get("max_open_trades", 5)
         self.max_daily_loss: float = risk_cfg.get("max_daily_loss", 0.05)
         self.min_rr_ratio: float = risk_cfg.get("min_rr_ratio", 1.0)
+        self.min_confidence: float = config.get("signals", {}).get("min_confidence", 75.0)
         self.atr_multiplier: float = risk_cfg.get("atr_multiplier", 1.5)
         self.tp1_multiplier: float = risk_cfg.get("tp1_multiplier", 1.5)
         self.tp2_multiplier: float = risk_cfg.get("tp2_multiplier", 3.0)
@@ -303,7 +304,9 @@ class RiskManager:
             )
             log.info(f"Signal rejected (ML validation): {sym}")
             return False, sizing
-        if not signal.is_actionable(self.min_rr_ratio):
+        if not signal.is_actionable(
+            min_confidence=self.min_confidence, min_rr=self.min_rr_ratio
+        ):
             sizing.rejection_reason = (
                 f"Signal not actionable: confidence={signal.confidence:.1f} "
                 f"R/R={signal.risk_reward_ratio:.2f}"

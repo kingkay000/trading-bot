@@ -41,6 +41,15 @@ from modules.market_data_store import market_data_store
 from modules.trade_monitor import TradeMonitor
 from modules.indicator_engine import IndicatorEngine
 from modules.pattern_detector import PatternDetector
+from modules.confluence_engine import ConfluenceEngine
+from modules.trade_blueprint_engine import TradeBlueprintEngine
+from modules.bridge_payload import build_signal_payload
+from modules.calibration import CalibrationResolver
+from modules.decision_trace_store import DecisionTraceStore
+from modules.portfolio_risk_allocator import PortfolioRiskAllocator
+from modules.regime_engine import RegimeEngine
+from modules.probability_engine import ProbabilityEngine
+from modules.signal_contract_guard import SignalContractGuard
 from modules.risk_manager import RiskManager
 from utils.helpers import load_config
 from utils.logger import get_logger, configure_from_config
@@ -112,6 +121,10 @@ class TradingBot:
 
         self.indicator_engine = IndicatorEngine(self.config)
         self.pattern_detector = PatternDetector(self.config)
+        self.confluence_engine = ConfluenceEngine(self.config.get("signals", {}))
+        self.blueprint_engine = TradeBlueprintEngine(
+            self.config.get("risk", {}).get("min_rr_ratio", 1.5)
+        )
         self.ai_signal_engine = AISignalEngine(self.config)
         self.fundamental_analyst = FundamentalAnalyst(self.config)
         self.fundamental_enabled = bool(
@@ -137,6 +150,19 @@ class TradingBot:
         self.estimated_calls_per_symbol = max(
             1, int(scan_batch_cfg.get("estimated_calls_per_symbol", 3))
         )
+        self.executable_tiers = set(
+            self.config.get("signals", {}).get("executable_tiers", ["TIER_1", "TIER_2"])
+        )
+        self.calibration = CalibrationResolver(self.config)
+        self.trace_store = DecisionTraceStore(
+            self.config.get("logging", {}).get("decision_trace_file", "logs/decision_trace.jsonl")
+        )
+        self.portfolio_allocator = PortfolioRiskAllocator(
+            int(self.config.get("risk", {}).get("max_same_quote_positions", 2))
+        )
+        self.regime_engine = RegimeEngine()
+        self.probability_engine = ProbabilityEngine()
+        self.signal_contract_guard = SignalContractGuard()
         self._batch_cursor = 0
         self._td_call_timestamps: deque[float] = deque()
         self._rate_guard_enabled = (
@@ -147,6 +173,10 @@ class TradingBot:
         self.ea_data_enabled = ea_data_cfg.get("enabled", True)
         self.ea_data_stale_after_seconds = int(ea_data_cfg.get("stale_after_seconds", 600))
         self.ea_data_fallback_to_api = ea_data_cfg.get("fallback_to_api", True)
+        self.ea_api_fallback_symbols = {
+            str(s).upper().replace("/", "")
+            for s in ea_data_cfg.get("api_fallback_symbols", self.config.get("trading", {}).get("symbols", []))
+        }
 
         # Historical tracking for dashboard
         self.signal_history: List[Dict[str, Any]] = []
@@ -249,6 +279,66 @@ class TradingBot:
         # 4. Detect Patterns + S/R
         patterns, sr_levels = self.pattern_detector.detect_all(df)
         slope = self.pattern_detector.calculate_slope(df)
+        confluence = self.confluence_engine.analyze(df, patterns, sr_levels)
+        cal = self.calibration.for_symbol(symbol)
+        regime = self.regime_engine.classify(df)
+        if confluence.tier in ("NO_SIGNAL", "TIER_4"):
+            log.info(
+                "Deterministic gate: %s confluence=%s score=%s → skip AI",
+                symbol,
+                confluence.tier,
+                confluence.score,
+            )
+            self._trace_decision(symbol, "blocked_tier", {"tier": confluence.tier, "score": confluence.score})
+            return
+        symbol_exec_tiers = set(cal.executable_tiers)
+        if confluence.tier not in symbol_exec_tiers:
+            log.info(
+                "Deterministic tier policy: %s tier=%s not in executable tiers=%s",
+                symbol,
+                confluence.tier,
+                sorted(symbol_exec_tiers),
+            )
+            self._trace_decision(
+                symbol,
+                "blocked_symbol_tier_policy",
+                {"tier": confluence.tier, "allowed_tiers": sorted(symbol_exec_tiers)},
+            )
+            return
+        close = float(df["close"].iloc[-1])
+        blueprint = self.blueprint_engine.build(
+            direction=confluence.direction,
+            close=close,
+            sr_levels=sr_levels,
+            market_structure=confluence.market_structure or {},
+            min_rr_override=cal.min_rr_ratio,
+        )
+        if not blueprint.valid:
+            log.info(
+                "Deterministic gate: %s blueprint invalid rr_tp1=%.2f (min %.2f)",
+                symbol,
+                blueprint.rr_tp1,
+                cal.min_rr_ratio,
+            )
+            self._trace_decision(
+                symbol,
+                "blocked_blueprint_rr",
+                {"rr_tp1": blueprint.rr_tp1, "min_rr_ratio": cal.min_rr_ratio},
+            )
+            return
+        probability = self.probability_engine.assess(
+            score=confluence.score,
+            rr=blueprint.rr_tp1,
+            regime=regime.regime,
+        )
+        min_p_win = float(self.config.get("signals", {}).get("min_p_win", 0.55))
+        if probability.p_win < min_p_win:
+            self._trace_decision(
+                symbol,
+                "blocked_probability_floor",
+                {"p_win": probability.p_win, "min_p_win": min_p_win, "regime": regime.regime},
+            )
+            return
 
         if htf_context:
             htf_context["slope"] = slope
@@ -274,8 +364,23 @@ class TradingBot:
                 return
 
         # 6. Generate AI Signal (with MTA Context)
+        precomputed_context = {
+            "confluence": confluence.to_dict(),
+            "trade_blueprint": blueprint.to_dict(),
+            "regime": regime.to_dict(),
+            "probability": probability.to_dict(),
+            "risk_constraints": {
+                "min_rr_ratio": cal.min_rr_ratio
+            },
+        }
         signal = self.ai_signal_engine.analyze(
-            df, patterns, sr_levels, symbol, timeframe, htf_context=htf_context
+            df,
+            patterns,
+            sr_levels,
+            symbol,
+            timeframe,
+            htf_context=htf_context,
+            precomputed_context=precomputed_context,
         )
         if self.fundamental_enabled:
             signal_direction = (
@@ -301,6 +406,38 @@ class TradingBot:
         )
 
         if signal.signal == "HOLD":
+            self._trace_decision(symbol, "ai_hold", {"reasoning": signal.reasoning[:160]})
+            return
+
+        # Deterministic/AI disagreement guard
+        ai_dir = str(signal.signal).upper()
+        expected = "BUY" if confluence.direction == "LONG" else "SELL" if confluence.direction == "SHORT" else "HOLD"
+        if ai_dir in ("BUY", "SELL") and expected in ("BUY", "SELL") and ai_dir != expected:
+            log.info("AI disagreement guard: %s deterministic=%s ai=%s", symbol, expected, ai_dir)
+            self._trace_decision(
+                symbol,
+                "blocked_ai_disagreement",
+                {"deterministic_direction": expected, "ai_direction": ai_dir, "tier": confluence.tier},
+            )
+            return
+        guard = self.signal_contract_guard.validate(
+            signal=signal,
+            blueprint=blueprint,
+            expected_direction=expected,
+            min_rr=cal.min_rr_ratio,
+        )
+        if not guard.approved:
+            self._trace_decision(
+                symbol,
+                "blocked_signal_contract_guard",
+                {"reason": guard.reason, "deterministic_direction": expected, "ai_direction": ai_dir},
+            )
+            return
+        alloc = self.portfolio_allocator.approve(symbol, self.risk_manager.open_positions)
+        if not alloc.approved:
+            self._trace_decision(
+                symbol, "blocked_portfolio_allocator", {"reason": alloc.reason, "symbol": symbol}
+            )
             return
 
         # Record signal time for cooldown
@@ -312,6 +449,11 @@ class TradingBot:
         if not approved:
             log.info(
                 f"Signal rejected by RiskManager for {symbol}: {sizing.rejection_reason}"
+            )
+            self._trace_decision(
+                symbol,
+                "blocked_risk_manager",
+                {"reason": sizing.rejection_reason, "tier": confluence.tier, "score": confluence.score},
             )
             return
 
@@ -354,6 +496,20 @@ class TradingBot:
                 order_id=close_order.order_id,
             )
 
+        self._trace_decision(
+            symbol,
+            "approved_for_execution",
+            {
+                "tier": confluence.tier,
+                "score": confluence.score,
+                "deterministic_direction": confluence.direction,
+                "ai_direction": ai_dir,
+                "rr_tp1": blueprint.rr_tp1,
+                "p_win": probability.p_win,
+                "regime": regime.regime,
+            },
+        )
+
         # Sync only approved, actionable signals to Execution Server
         try:
             self._sync_signal_to_server(signal)
@@ -378,6 +534,7 @@ class TradingBot:
 
     def _get_symbol_data(self, symbol: str, timeframe: str, higher_timeframe: str) -> Any:
         """Return (df, df_htf) from EA push store when fresh; fallback to API if enabled."""
+        symbol_key = symbol.upper().replace("/", "")
         if self.ea_data_enabled:
             df = market_data_store.get_df(
                 symbol=symbol,
@@ -410,6 +567,16 @@ class TradingBot:
             if not self.ea_data_fallback_to_api:
                 log.info(
                     "EA data unavailable for %s (missing_tfs=%s stale_tfs=%s fresh_tfs=%s, max_age=%ss), and fallback_to_api is disabled.",
+                    symbol,
+                    missing_tfs,
+                    stale_tfs,
+                    fresh_tfs,
+                    self.ea_data_stale_after_seconds,
+                )
+                return self._empty_df(), self._empty_df()
+            if symbol_key not in self.ea_api_fallback_symbols:
+                log.info(
+                    "EA data unavailable for %s (missing_tfs=%s stale_tfs=%s fresh_tfs=%s, max_age=%ss), and API fallback is disabled for this symbol.",
                     symbol,
                     missing_tfs,
                     stale_tfs,
@@ -566,26 +733,17 @@ class TradingBot:
         api_key = os.getenv("EXECUTION_BRIDGE_KEY", "default_secret_key")
         
         payload = {
-            "symbol": signal.symbol,
-            "direction": signal.signal,
-            "entry_price": float(signal.entry_price),
-            "stop_loss": float(signal.stop_loss),
-            "take_profit": float(signal.take_profit_1),
-            "confidence": float(signal.confidence),
-            "reasoning": signal.reasoning,
-            "timestamp": time.time()
+            **build_signal_payload(
+                signal, getattr(signal, "fundamental_context", None) if self.fundamental_enabled else None
+            )
         }
-        if self.fundamental_enabled:
-            ctx = getattr(signal, "fundamental_context", None)
-            if ctx is not None:
-                payload.update(
-                    {
-                        "fundamental_rating": int(ctx.fundamental_rating),
-                        "fundamental_conviction": ctx.fundamental_conviction,
-                        "fundamental_note": ctx.fundamental_note,
-                    }
-                )
-        
+        if not payload.get("symbol"):
+            log.warning("Execution bridge payload dropped: missing symbol")
+            return
+        if payload.get("direction") not in ("BUY", "SELL", "HOLD"):
+            log.warning("Execution bridge payload dropped: invalid direction=%s", payload.get("direction"))
+            return
+
         headers = {"X-API-KEY": api_key}
         requests.post(url, json=payload, headers=headers, timeout=5)
 
@@ -646,6 +804,12 @@ class TradingBot:
         base = self.bridge_url.rstrip("/")
         return base.replace("://0.0.0.0", "://127.0.0.1")
 
+    def _trace_decision(self, symbol: str, stage: str, extra: Dict[str, Any]) -> None:
+        try:
+            self.trace_store.append({"symbol": symbol, "stage": stage, **extra})
+        except Exception as exc:
+            log.debug(f"Decision trace append failed: {exc}")
+
     async def run_backtest(self) -> None:
         """Run backtesting mode for multiple timeframes and exit."""
         bt = Backtester(self.config, self.data_engine)
@@ -670,14 +834,6 @@ def main():
     parser.add_argument("--backtest", action="store_true", help="Run backtest mode")
     parser.add_argument("--timeframe", help="Override timeframe")
     args = parser.parse_args()
-
-    # Render web services expect a bound port; keep a tiny health endpoint open.
-    port = os.getenv("PORT")
-    if port and not args.backtest:
-        try:
-            start_health_server(int(port))
-        except Exception as exc:
-            log.warning(f"Failed to start health server on PORT={port}: {exc}")
 
     # Load Config
     config = load_config("config.yaml")
