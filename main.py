@@ -102,13 +102,22 @@ class TradingBot:
             except ModuleNotFoundError as exc:
                 fallback_exchange = self.config["trading"].get("fallback_exchange", "twelvedata")
                 fallback_symbols = self.config["trading"].get("fallback_symbols")
+                ea_cfg = self.config.get("ea_data", {})
+                ea_data_enabled = bool(ea_cfg.get("enabled", True))
                 log.warning(
                     "MetaTrader5 is not available in this environment. "
                     f"Falling back to '{fallback_exchange}'. Original error: {exc}"
                 )
                 self.config["trading"]["exchange"] = fallback_exchange
-                if fallback_symbols:
+                if fallback_symbols and not ea_data_enabled:
                     self.config["trading"]["symbols"] = fallback_symbols
+                elif fallback_symbols and ea_data_enabled:
+                    log.info(
+                        "EA data mode enabled: keeping full symbol pool=%s; "
+                        "API fallback remains limited by ea_data.api_fallback_symbols=%s",
+                        self.config["trading"].get("symbols", []),
+                        ea_cfg.get("api_fallback_symbols", fallback_symbols),
+                    )
                 self.data_engine = DataEngine(self.config)
                 self.execution_engine = ExecutionEngine(
                     self.config, exchange=getattr(self.data_engine, "exchange", None)
