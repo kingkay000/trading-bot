@@ -40,7 +40,7 @@ risk:
   max_same_quote_positions: 2  # portfolio allocator quote-currency cap
   max_trades_per_day: 5        # New: anti-overtrading limit
   max_daily_loss: 0.05         # 5% daily loss limit → bot pauses
-  min_rr_ratio: 1.5            # minimum risk/reward to take trade
+  min_rr_ratio: 1.2            # minimum risk/reward to take trade
   atr_multiplier: 1.5          # ATR × this = stop-loss distance
   tp1_multiplier: 1.5          # TP1 = 1.5× the risk amount
   tp2_multiplier: 3.0          # TP2 = 3.0× the risk amount
@@ -156,10 +156,10 @@ execution_bridge:
 calibration:
   symbols:
     XAUUSD:
-      min_rr_ratio: 1.6
+      min_rr_ratio: 1.2
       executable_tiers: ["TIER_1", "TIER_2", "TIER_3"]
     EURUSD:
-      min_rr_ratio: 1.5
+      min_rr_ratio: 1.2
       executable_tiers: ["TIER_1", "TIER_2", "TIER_3"]
 ea_data:
   enabled: true
