@@ -4,6 +4,15 @@ trading:
     - "GBPUSD"
     - "USDJPY"
     - "XAUUSD"
+    - "AUDUSD"
+    - "USDCAD"
+    - "USDCHF"
+    - "NZDUSD"
+  fallback_symbols:
+    - "EURUSD"
+    - "GBPUSD"
+    - "USDJPY"
+    - "XAUUSD"
   timeframe: "1h"
   higher_timeframe: "4h"
   mode: "paper"
@@ -28,9 +37,10 @@ mt5:
 risk:
   max_risk_per_trade: 0.015    # 1.5% of account balance per trade
   max_open_trades: 3
+  max_same_quote_positions: 2  # portfolio allocator quote-currency cap
   max_trades_per_day: 5        # New: anti-overtrading limit
   max_daily_loss: 0.05         # 5% daily loss limit → bot pauses
-  min_rr_ratio: 1.5            # minimum risk/reward to take trade
+  min_rr_ratio: 1.2            # minimum risk/reward to take trade
   atr_multiplier: 1.5          # ATR × this = stop-loss distance
   tp1_multiplier: 1.5          # TP1 = 1.5× the risk amount
   tp2_multiplier: 3.0          # TP2 = 3.0× the risk amount
@@ -38,8 +48,10 @@ risk:
 
 signals:
   min_confidence: 75           # minimum AI confidence score to act
+  min_p_win: 0.55              # probabilistic floor after deterministic scoring
   require_confluence: true
   min_confluence_count: 3      # patterns + indicator signals needed
+  executable_tiers: ["TIER_1", "TIER_2", "TIER_3"]  # deterministic pre-AI execution policy
   signal_cooldown_minutes: 15  # min wait between signals per symbol
 
 # ─── Market Hours ──────────────────────────────────────────────────────────
@@ -115,6 +127,7 @@ data:
 logging:
   log_dir: "logs"
   log_file: "trading_bot.log"
+  decision_trace_file: "logs/decision_trace.jsonl"
   max_bytes: 10485760          # 10 MB per log file
   backup_count: 5
   level: "INFO"
@@ -140,7 +153,16 @@ execution_bridge:
   enabled: true
   url: "http://0.0.0.0:10000"
 
+calibration:
+  symbols:
+    XAUUSD:
+      min_rr_ratio: 1.2
+      executable_tiers: ["TIER_1", "TIER_2", "TIER_3"]
+    EURUSD:
+      min_rr_ratio: 1.2
+      executable_tiers: ["TIER_1", "TIER_2", "TIER_3"]
 ea_data:
   enabled: true
   stale_after_seconds: 600
   fallback_to_api: true
+  api_fallback_symbols: ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]
